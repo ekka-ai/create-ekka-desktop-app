@@ -19,7 +19,7 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist', 'node_modules', 'vite.config.ts', 'eslint.config.js']),
+  globalIgnores(['dist', 'node_modules', 'src-tauri', 'vite.config.ts', 'eslint.config.js']),
 
   // Base config for all TypeScript files
   {

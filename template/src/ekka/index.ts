@@ -1,37 +1,74 @@
 /**
- * EKKA Client - Main Export
- * DO NOT EDIT - Managed by EKKA
+ * EKKA Client
  *
- * Usage:
- *   import { ekka } from './ekka';
+ * Main entry point for the EKKA client library.
  *
- *   await ekka.connect();
- *   await ekka.db.put('key', value);
- *   const data = await ekka.db.get('key');
+ * @example
+ * ```typescript
+ * import { ekka } from './ekka';
  *
- * Everything runs in memory. No setup required.
+ * await ekka.init();
+ * await ekka.connect();
+ * await ekka.db.put('key', value);
+ * const data = await ekka.db.get('key');
+ * ```
  */
 
-import { connect, disconnect, isConnected } from './client';
-import { db, queue } from './api';
-import type { Job } from './api';
+import {
+  initRuntime,
+  getBackend,
+  getCurrentRuntimeInfo,
+  getCurrentMode,
+  refreshRuntimeInfo,
+} from './core/runtime';
+import { db } from './api/db';
+import { queue } from './api/queue';
+import { pipeline } from './api/pipeline';
+import { vault } from './api/vault';
 
+// =============================================================================
+// PUBLIC API
+// =============================================================================
+
+/**
+ * EKKA client instance.
+ * This is the main entry point for all EKKA operations.
+ */
 export const ekka = {
   /**
-   * Connect to the local demo environment.
-   * Must be called before any db/queue operations.
+   * Initialize the EKKA runtime.
+   * Auto-detects environment and selects appropriate backend.
+   * Call once at app startup.
    */
-  connect,
+  init: initRuntime,
 
   /**
-   * Disconnect from the demo environment.
+   * Connect to the EKKA environment.
+   * Must be called before any db/queue operations.
    */
-  disconnect,
+  connect: () => getBackend().connect(),
+
+  /**
+   * Disconnect from the EKKA environment.
+   */
+  disconnect: () => getBackend().disconnect(),
 
   /**
    * Check if connected.
    */
-  isConnected,
+  isConnected: () => getBackend().isConnected(),
+
+  /**
+   * Runtime information and mode.
+   */
+  runtime: {
+    /** Get current runtime info. */
+    info: getCurrentRuntimeInfo,
+    /** Get current transport mode ('demo' or 'engine'). */
+    mode: getCurrentMode,
+    /** Refresh runtime info (re-detect environment). */
+    refresh: refreshRuntimeInfo,
+  },
 
   /**
    * Key-value database operations.
@@ -42,10 +79,74 @@ export const ekka = {
    * Job queue operations.
    */
   queue,
+
+  /**
+   * Intent pipeline operations.
+   */
+  pipeline,
+
+  /**
+   * Policy vault operations.
+   */
+  vault,
 };
 
-// Re-export types
-export type { Job };
+// =============================================================================
+// TYPE EXPORTS
+// =============================================================================
 
-// Re-export errors
-export { EkkaError, EkkaNotConnectedError, EkkaConnectionError, EkkaApiError } from './errors';
+export type {
+  // Contract types
+  EngineRequest,
+  EngineResponse,
+  EngineErrorDetail,
+  // Runtime types
+  RuntimeType,
+  TransportMode,
+  RuntimeInfo,
+  // API types
+  Job,
+  SessionInfo,
+  // Intent types
+  IntentDecision,
+  IntentStatus,
+  AIOverride,
+  AIUsed,
+  IntentRequest,
+  IntentResult,
+  // Policy types
+  FallbackBehavior,
+  FlightConfig,
+  AIDefaults,
+  Thresholds,
+  PolicyProfile,
+  PolicySource,
+  ResolvedPolicy,
+  // Vault types
+  BundleInfo,
+  BundleInstall,
+  // Pipeline event types
+  PipelineEventType,
+  PipelineEvent,
+  // Queue extended types
+  HeartbeatResult,
+} from './types';
+
+// =============================================================================
+// ERROR EXPORTS
+// =============================================================================
+
+export {
+  EkkaError,
+  EkkaNotConnectedError,
+  EkkaConnectionError,
+  EkkaApiError,
+  EkkaEngineNotPresentError,
+} from './errors';
+
+// =============================================================================
+// CONSTANT EXPORTS
+// =============================================================================
+
+export { OPS, ERROR_CODES, CONTRACT_VERSION } from './constants';
+export type { OpName, ErrorCode } from './constants';
