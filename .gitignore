@@ -1,0 +1,4 @@
+node_modules/
+sync-test/
+settings-test/
+*.tsbuildinfo
