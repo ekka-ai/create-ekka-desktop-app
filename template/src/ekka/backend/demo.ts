@@ -9,6 +9,13 @@ import type { EngineRequest, EngineResponse } from '../types';
 import type { Backend } from './interface';
 import { OPS, ERROR_CODES } from '../constants';
 import { ok, err } from '../types';
+import branding from '../../../branding/app.json';
+
+// Derive display-only home path from branding (no OS detection, works in browser)
+function slugify(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+}
+const DEMO_HOME_PATH = `~/.local/share/${slugify(branding.name) || 'ekka-desktop'}`;
 
 /**
  * Demo backend using in-memory storage.
@@ -55,7 +62,7 @@ export class DemoBackend implements Backend {
           engine_present: false,
           mode: 'demo',
           homeState: this.getHomeState(),
-          homePath: '/demo/home',
+          homePath: DEMO_HOME_PATH,
         });
       }
 
@@ -84,7 +91,7 @@ export class DemoBackend implements Backend {
       case OPS.HOME_STATUS: {
         return ok({
           state: this.getHomeState(),
-          homePath: '/demo/home',
+          homePath: DEMO_HOME_PATH,
           grantPresent: this.homeGranted,
           reason: this.homeGranted ? null : 'Demo mode - call home.grant to simulate',
         });

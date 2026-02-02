@@ -2,11 +2,13 @@
 //!
 //! Standalone demo implementation for CDA-generated apps.
 //! Returns demo responses for all operations (no SDK dependencies).
+//! Reads branding/app.json to configure app name and home path.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
 
@@ -25,7 +27,7 @@ pub struct EngineRequest {
 pub struct EngineResponse {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<Value>,
+    pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorInfo>,
 }
@@ -37,14 +39,14 @@ pub struct ErrorInfo {
 }
 
 impl EngineResponse {
-    pub fn ok(data: Value) -> Self {
-        Self { ok: true, data: Some(data), error: None }
+    pub fn ok(result: Value) -> Self {
+        Self { ok: true, result: Some(result), error: None }
     }
 
     pub fn err(code: &str, message: &str) -> Self {
         Self {
             ok: false,
-            data: None,
+            result: None,
             error: Some(ErrorInfo {
                 code: code.to_string(),
                 message: message.to_string(),
@@ -54,14 +56,123 @@ impl EngineResponse {
 }
 
 // =============================================================================
+// Branding
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Branding {
+    name: String,
+    #[serde(rename = "bundleId")]
+    bundle_id: String,
+    version: String,
+}
+
+impl Default for Branding {
+    fn default() -> Self {
+        Self {
+            name: "EKKA Desktop".to_string(),
+            bundle_id: "ai.ekka.desktop".to_string(),
+            version: "0.1.0".to_string(),
+        }
+    }
+}
+
+/// Convert app name to folder slug (lowercase, spaces to hyphens)
+fn app_name_to_slug(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Compute home path based on app name
+fn compute_home_path(app_name: &str) -> PathBuf {
+    let slug = app_name_to_slug(app_name);
+
+    // Use OS-specific data directory
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = dirs::home_dir() {
+            return home.join("Library").join("Application Support").join(&slug);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(data) = dirs::data_local_dir() {
+            return data.join(&slug);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(data) = dirs::data_dir() {
+            return data.join(&slug);
+        }
+    }
+
+    // Fallback to home directory with dot-prefix
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(format!(".{}", slug))
+}
+
+/// Load branding from app.json
+fn load_branding() -> Branding {
+    // Try to find branding/app.json relative to executable or current dir
+    let paths_to_try = [
+        // Relative to current directory (dev mode)
+        PathBuf::from("branding/app.json"),
+        PathBuf::from("../branding/app.json"),
+        // Relative to executable (production bundle)
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.join("../Resources/branding/app.json")))
+            .unwrap_or_default(),
+    ];
+
+    for path in &paths_to_try {
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                if let Ok(branding) = serde_json::from_str::<Branding>(&content) {
+                    return branding;
+                }
+            }
+        }
+    }
+
+    // Fallback to default
+    Branding::default()
+}
+
+// =============================================================================
 // State
 // =============================================================================
 
-#[derive(Default)]
 pub struct EngineState {
     connected: Mutex<bool>,
     auth: Mutex<Option<AuthContext>>,
     home_granted: Mutex<bool>,
+    branding: Branding,
+    home_path: PathBuf,
+}
+
+impl Default for EngineState {
+    fn default() -> Self {
+        let branding = load_branding();
+        let home_path = compute_home_path(&branding.name);
+        Self {
+            connected: Mutex::new(false),
+            auth: Mutex::new(None),
+            home_granted: Mutex::new(false),
+            branding,
+            home_path,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +209,8 @@ fn engine_disconnect(state: State<EngineState>) {
 
 #[tauri::command]
 fn engine_request(req: EngineRequest, state: State<EngineState>) -> EngineResponse {
+    let home_path_str = state.home_path.display().to_string();
+
     // Check connected (except for status operations)
     if !matches!(req.op.as_str(), "runtime.info" | "home.status") {
         let connected = match state.connected.lock() {
@@ -123,7 +236,9 @@ fn engine_request(req: EngineRequest, state: State<EngineState>) -> EngineRespon
                 "engine_present": false,
                 "mode": "demo",
                 "homeState": home_state,
-                "homePath": "/demo/home"
+                "homePath": home_path_str,
+                "appName": state.branding.name,
+                "appVersion": state.branding.version
             }))
         }
 
@@ -154,9 +269,9 @@ fn engine_request(req: EngineRequest, state: State<EngineState>) -> EngineRespon
             let home_granted = state.home_granted.lock().map(|g| *g).unwrap_or(false);
             EngineResponse::ok(json!({
                 "state": home_state,
-                "homePath": "/demo/home",
+                "homePath": home_path_str,
                 "grantPresent": home_granted,
-                "reason": if home_granted { Value::Null } else { json!("Demo mode - call home.grant to simulate") }
+                "reason": if home_granted { Value::Null } else { json!("Demo mode - click Continue to proceed") }
             }))
         }
 
