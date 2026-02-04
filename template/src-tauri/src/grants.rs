@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Check if a valid HOME grant exists for the given auth context
-pub fn check_home_grant(home_path: &PathBuf, auth: &AuthContext) -> Result<bool, String> {
+pub fn check_home_grant(home_path: &PathBuf, auth: &AuthContext, verify_key: &str) -> Result<bool, String> {
     let grants_path = home_path.join("grants.json");
 
     // No grants file = no grant
@@ -18,11 +18,7 @@ pub fn check_home_grant(home_path: &PathBuf, auth: &AuthContext) -> Result<bool,
         return Ok(false);
     }
 
-    // Load engine verify key
-    let key_b64 = match std::env::var("ENGINE_GRANT_VERIFY_KEY_B64") {
-        Ok(k) => k,
-        Err(_) => return Err("ENGINE_GRANT_VERIFY_KEY_B64 not set".to_string()),
-    };
+    let key_b64 = verify_key;
 
     // Load and verify grants
     let store = GrantStore::new(grants_path, &key_b64).map_err(|e| e.to_string())?;
@@ -101,8 +97,21 @@ pub fn get_home_status(state: &EngineState) -> (HomeState, PathBuf, bool, Option
         None => return (HomeState::BootstrapPreLogin, home_path, false, None),
     };
 
+    // Get verify key from state (fetched from well-known endpoint)
+    let verify_key = match state.get_grant_verify_key() {
+        Some(k) => k,
+        None => {
+            return (
+                HomeState::AuthenticatedNoHomeGrant,
+                home_path,
+                false,
+                Some("Grant verification key not loaded. Waiting for engine configuration.".to_string()),
+            );
+        }
+    };
+
     // Check for valid HOME grant
-    match check_home_grant(&home_path, &auth) {
+    match check_home_grant(&home_path, &auth, &verify_key) {
         Ok(true) => (HomeState::HomeGranted, home_path, true, None),
         Ok(false) => (
             HomeState::AuthenticatedNoHomeGrant,

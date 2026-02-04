@@ -11,6 +11,7 @@ mod config;
 mod device_secret;
 mod engine_process;
 mod grants;
+mod well_known;
 mod handlers;
 mod node_auth;
 mod node_credentials;
@@ -30,14 +31,11 @@ use tauri::Manager;
 
 fn main() {
     // Load .env.local for development (before anything else)
-    // This provides ENGINE_GRANT_VERIFY_KEY_B64, EKKA_SECURITY_EPOCH, etc.
-    if let Err(e) = dotenvy::from_filename(".env.local") {
+    // This provides EKKA_SECURITY_EPOCH and other dev-time overrides.
+    // Note: ENGINE_GRANT_VERIFY_KEY_B64 is now fetched from /.well-known/ekka-configuration
+    if let Err(_) = dotenvy::from_filename(".env.local") {
         // Also try parent directory (when running from src-tauri)
         let _ = dotenvy::from_filename("../.env.local");
-        // Silence error in production where .env.local may not exist
-        if std::env::var("ENGINE_GRANT_VERIFY_KEY_B64").is_err() {
-            eprintln!("Warning: .env.local not loaded and ENGINE_GRANT_VERIFY_KEY_B64 not set: {}", e);
-        }
     }
 
     // Initialize tracing for runner logs
@@ -65,14 +63,12 @@ fn main() {
             // Attempt to spawn engine process
             tracing::info!(op = "desktop.startup", "EKKA Desktop starting");
 
-            // Log required env vars status
-            let grant_key_set = std::env::var("ENGINE_GRANT_VERIFY_KEY_B64").is_ok();
+            // Log security epoch status (still needed for home bootstrap)
             let security_epoch_set = std::env::var("EKKA_SECURITY_EPOCH").is_ok();
             tracing::info!(
                 op = "desktop.required_env.loaded",
-                ENGINE_GRANT_VERIFY_KEY_B64 = grant_key_set,
                 EKKA_SECURITY_EPOCH = security_epoch_set,
-                "Required security env vars"
+                "Security epoch env var status"
             );
 
             // Log build-time baked engine URL presence (not the URL itself)
@@ -106,6 +102,28 @@ fn main() {
             let state_handle = app.state::<EngineState>();
             let node_auth_holder = state_handle.node_auth_token.clone();
             let node_auth_state = state_handle.node_auth_state.clone();
+
+            // Fetch grant verification key from engine's well-known endpoint
+            // This runs async and caches the key in state for grant verification
+            let app_handle = app.app_handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app_handle.state::<EngineState>();
+                match well_known::fetch_and_cache_verify_key(&state).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            op = "desktop.well_known.loaded",
+                            "Grant verification key loaded from engine"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            op = "desktop.well_known.failed",
+                            error = %e,
+                            "Failed to fetch grant verification key - grants will not be verified"
+                        );
+                    }
+                }
+            });
 
             // Spawn engine in background thread to not block UI
             let engine = engine_for_setup.clone();

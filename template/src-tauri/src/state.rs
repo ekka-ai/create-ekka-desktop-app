@@ -325,6 +325,8 @@ pub struct EngineState {
     pub node_auth_state: Arc<NodeAuthStateHolder>,
     /// External engine process (Phase 3A)
     pub engine_process: Option<Arc<EngineProcess>>,
+    /// Cached grant verification key (fetched from /.well-known/ekka-configuration)
+    pub grant_verify_key: RwLock<Option<String>>,
 }
 
 impl Default for EngineState {
@@ -341,6 +343,7 @@ impl Default for EngineState {
             node_auth_token: Arc::new(NodeAuthTokenHolder::new()),
             node_auth_state: Arc::new(NodeAuthStateHolder::new()),
             engine_process: None,
+            grant_verify_key: RwLock::new(None),
         }
     }
 }
@@ -360,6 +363,7 @@ impl EngineState {
             node_auth_token: Arc::new(NodeAuthTokenHolder::new()),
             node_auth_state: Arc::new(NodeAuthStateHolder::new()),
             engine_process: Some(engine),
+            grant_verify_key: RwLock::new(None),
         }
     }
 
@@ -430,6 +434,18 @@ impl EngineState {
     /// Should be called on logout or auth context changes.
     pub fn clear_vault_cache(&self) {
         self.vault_cache.clear();
+    }
+
+    /// Get cached grant verification key
+    pub fn get_grant_verify_key(&self) -> Option<String> {
+        self.grant_verify_key.read().ok()?.clone()
+    }
+
+    /// Set grant verification key (fetched from well-known endpoint)
+    pub fn set_grant_verify_key(&self, key: String) {
+        if let Ok(mut guard) = self.grant_verify_key.write() {
+            *guard = Some(key);
+        }
     }
 }
 
