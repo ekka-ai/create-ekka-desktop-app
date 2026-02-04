@@ -1,6 +1,6 @@
 {
   "name": "create-ekka-desktop-app",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Create an EKKA desktop app with built-in demo backend. No setup required.",
   "type": "module",
   "bin": {

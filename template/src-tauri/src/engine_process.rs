@@ -51,25 +51,42 @@ fn build_engine_env() -> Result<Vec<(&'static str, String)>, &'static str> {
         env.push(("EKKA_ENGINE_URL", url.to_string()));
     }
 
-    // EKKA_INTERNAL_SERVICE_KEY - required for engine mode
+    // EKKA_INTERNAL_SERVICE_KEY - optional for desktop (only needed for engine-bootstrap binary)
+    // Desktop runner uses node session auth, not internal key
     let internal_key = std::env::var("EKKA_INTERNAL_SERVICE_KEY")
         .or_else(|_| std::env::var("INTERNAL_SERVICE_KEY"))
-        .map_err(|_| "EKKA_INTERNAL_SERVICE_KEY")?;
-    env.push(("EKKA_INTERNAL_SERVICE_KEY", internal_key));
+        .ok();
 
-    // EKKA_TENANT_ID - required, must be valid UUID
-    let tenant_id = std::env::var("EKKA_TENANT_ID")
-        .map_err(|_| "EKKA_TENANT_ID")?;
-    uuid::Uuid::parse_str(&tenant_id)
-        .map_err(|_| "EKKA_TENANT_ID")?;
-    env.push(("EKKA_TENANT_ID", tenant_id));
+    if let Some(ref key) = internal_key {
+        env.push(("EKKA_INTERNAL_SERVICE_KEY", key.clone()));
+        tracing::info!(
+            op = "desktop.internal_key.optional",
+            present = true,
+            "Internal service key configured (for engine-bootstrap)"
+        );
+    } else {
+        tracing::info!(
+            op = "desktop.internal_key.optional",
+            present = false,
+            "Internal service key not set (desktop runner uses node session auth)"
+        );
+    }
 
-    // EKKA_WORKSPACE_ID - required, must be valid UUID
-    let workspace_id = std::env::var("EKKA_WORKSPACE_ID")
-        .map_err(|_| "EKKA_WORKSPACE_ID")?;
-    uuid::Uuid::parse_str(&workspace_id)
-        .map_err(|_| "EKKA_WORKSPACE_ID")?;
-    env.push(("EKKA_WORKSPACE_ID", workspace_id));
+    // EKKA_TENANT_ID - optional for desktop (only needed for engine-bootstrap binary)
+    // Desktop runner gets tenant_id from node session
+    if let Ok(tenant_id) = std::env::var("EKKA_TENANT_ID") {
+        if uuid::Uuid::parse_str(&tenant_id).is_ok() {
+            env.push(("EKKA_TENANT_ID", tenant_id));
+        }
+    }
+
+    // EKKA_WORKSPACE_ID - optional for desktop (only needed for engine-bootstrap binary)
+    // Desktop runner gets workspace_id from node session
+    if let Ok(workspace_id) = std::env::var("EKKA_WORKSPACE_ID") {
+        if uuid::Uuid::parse_str(&workspace_id).is_ok() {
+            env.push(("EKKA_WORKSPACE_ID", workspace_id));
+        }
+    }
 
     // Node credentials: Try keychain first, fall back to env vars
     // This enables headless engine startup without manual env exports

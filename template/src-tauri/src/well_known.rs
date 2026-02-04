@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 /// Response from /.well-known/ekka-configuration
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Fields used for deserialization, may not all be read
 pub struct WellKnownConfig {
     pub grant_verify_key_b64: String,
     pub grant_signing_algorithm: String,
