@@ -763,8 +763,7 @@ fn handle_bootstrap_node_session(payload: &Value, state: &EngineState) -> Engine
         Err(e) => return EngineResponse::err("INTERNAL_ERROR", &e.to_string()),
     };
 
-    // REQUIRE node auth token (from startup auth via node_id + node_secret)
-    // Do NOT fall back to user auth or Ed25519 flow
+    // Get node auth token - try auto-auth if not available
     let node_token = match state.get_node_auth_token() {
         Some(token) => {
             tracing::info!(
@@ -776,14 +775,55 @@ fn handle_bootstrap_node_session(payload: &Value, state: &EngineState) -> Engine
             token
         }
         None => {
-            tracing::error!(
-                op = "node_session.no_token",
-                "Node auth token not available - authenticate node at startup first"
+            // Token missing - try auto-auth from vault (single-flight)
+            // Check prerequisites BEFORE acquiring lock
+            if !node_credentials::has_credentials() {
+                tracing::error!(
+                    op = "node_session.no_credentials",
+                    "Node credentials not configured"
+                );
+                return EngineResponse::err(
+                    "NODE_CREDENTIALS_MISSING",
+                    "Node credentials not configured. Complete setup first.",
+                );
+            }
+
+            // Get engine URL from baked config (same source as everywhere else)
+            let engine_url = config::engine_url();
+
+            // Now acquire single-flight lock (after all prerequisite checks)
+            if !state.node_auth_state.try_start() {
+                return EngineResponse::err("NODE_AUTH_IN_PROGRESS", "Authentication in progress, please wait");
+            }
+
+            // From here, ALL paths must call set_authenticated() or set_failed()
+            tracing::info!(
+                op = "node_session.auto_auth",
+                "Auto-authenticating node after setup"
             );
-            return EngineResponse::err(
-                "NODE_NOT_AUTHENTICATED",
-                "Node not authenticated. Restart app with valid node credentials.",
-            );
+
+            match node_credentials::authenticate_node(engine_url) {
+                Ok(token) => {
+                    state.node_auth_token.set(token.clone());
+                    state.node_auth_state.set_authenticated();
+                    tracing::info!(
+                        op = "node_session.auto_auth_success",
+                        node_id = %token.node_id,
+                        "Node auto-authenticated successfully"
+                    );
+                    token
+                }
+                Err(e) => {
+                    let error_msg = format!("Node authentication failed: {}", e);
+                    tracing::error!(
+                        op = "node_session.auto_auth_failed",
+                        error = %e,
+                        "Node auto-authentication failed"
+                    );
+                    state.node_auth_state.set_failed(error_msg.clone());
+                    return EngineResponse::err("NODE_NOT_AUTHENTICATED", &error_msg);
+                }
+            }
         }
     };
 
