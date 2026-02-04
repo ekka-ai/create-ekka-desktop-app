@@ -741,18 +741,9 @@ fn handle_ensure_node_identity(state: &EngineState) -> EngineResponse {
 /// Requires local engine to be available (strict local engine mode).
 /// Does NOT use Ed25519 register/challenge/session flow.
 fn handle_bootstrap_node_session(payload: &Value, state: &EngineState) -> EngineResponse {
-    // STRICT LOCAL ENGINE MODE: Gate node_auth + node_runner behind engine availability
-    if !state.is_engine_available() {
-        tracing::warn!(
-            op = "node_runner.skipped.engine_unavailable",
-            engine_available = false,
-            "Node session bootstrap skipped: local engine not available"
-        );
-        return EngineResponse::err(
-            "ENGINE_UNAVAILABLE",
-            "Local engine not available. Node session requires local engine.",
-        );
-    }
+    // NodeSessionRunner is an in-process runner that uses node session auth (Authorization: Bearer).
+    // It does NOT require the local engine-bootstrap binary - it makes direct HTTP calls to the engine API.
+    // The engine_available check was overly restrictive and has been removed.
 
     // Get home_path
     let home_path = match state.home_path.lock() {
