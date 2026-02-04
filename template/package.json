@@ -14,7 +14,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "prebuild:check": "node -e \"const fs=require('fs');const p=s=>{try{return fs.readFileSync(s,'utf8')}catch{return''}};const e=['.env.local','.env','src-tauri/.env.local','src-tauri/.env'].map(p).join('\\n');if(!/^EKKA_ENGINE_URL=.+/m.test(e)&&!process.env.EKKA_ENGINE_URL){console.error('\\n❌ EKKA_ENGINE_URL not set. Add to .env.local before building:\\n\\n   echo \\'EKKA_ENGINE_URL=https://api.ekka.ai\\' >> .env.local\\n');process.exit(1)}console.log('✓ EKKA_ENGINE_URL configured')\"",
+    "tauri:build": "npm run prebuild:check && tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
