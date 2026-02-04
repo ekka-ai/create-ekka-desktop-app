@@ -19,7 +19,7 @@ pub struct WellKnownConfig {
 /// Returns the grant verification key (base64).
 pub async fn fetch_grant_verify_key() -> Result<String, String> {
     let engine_url = config::engine_url();
-    let url = format!("{}/.well-known/ekka-configuration", engine_url.trim_end_matches('/'));
+    let url = format!("{}/engine/.well-known/ekka-configuration", engine_url.trim_end_matches('/'));
 
     tracing::info!(
         op = "well_known.fetch.start",
