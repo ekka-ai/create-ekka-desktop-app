@@ -282,6 +282,44 @@ fn engine_request(req: EngineRequest, state: State<EngineState>) -> EngineRespon
             }))
         }
 
+        // Setup (required for app initialization)
+        "setup.status" => {
+            // In demo mode, setup is always complete (no node credentials needed)
+            EngineResponse::ok(json!({
+                "nodeIdentity": "configured",
+                "setupComplete": true,
+                "mode": "demo"
+            }))
+        }
+
+        // Node Credentials (stub - demo mode doesn't need real credentials)
+        "nodeCredentials.status" => {
+            EngineResponse::ok(json!({
+                "hasCredentials": true,
+                "nodeId": "demo-node-id",
+                "isAuthenticated": false,
+                "mode": "demo"
+            }))
+        }
+
+        "nodeCredentials.set" => {
+            EngineResponse::ok(json!({ "ok": true, "nodeId": "demo-node-id" }))
+        }
+
+        "nodeCredentials.clear" => {
+            EngineResponse::ok(json!({ "ok": true }))
+        }
+
+        // Runner task stats (stub)
+        "runner.taskStats" => {
+            EngineResponse::ok(json!({
+                "pending": 0,
+                "running": 0,
+                "completed": 0,
+                "failed": 0
+            }))
+        }
+
         // Node Session (stub - return demo status)
         "nodeSession.ensureIdentity" => {
             let node_id = uuid::Uuid::new_v4();
