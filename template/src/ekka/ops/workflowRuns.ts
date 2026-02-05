@@ -1,5 +1,8 @@
 /**
- * Workflow Runs Operations
+ * Workflow Runs Operations (DEPRECATED - V1/Temporal)
+ *
+ * @deprecated Use executionRuns.ts instead. V1 workflow runs use Temporal which is no longer active.
+ * This module is preserved for backwards compatibility only. New code should use V2 execution runs.
  *
  * Create and poll workflow runs via Rust proxy.
  * All HTTP is handled by Rust - no fetch() in TS.

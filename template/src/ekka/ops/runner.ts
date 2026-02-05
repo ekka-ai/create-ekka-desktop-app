@@ -26,7 +26,7 @@ export interface RunnerStatus {
   lastError: string | null;
 }
 
-/** Task queue stats from engine API */
+/** Task queue stats from engine API (V2) */
 export interface RunnerTaskStats {
   counts: {
     pending: number;
@@ -34,20 +34,34 @@ export interface RunnerTaskStats {
     completed_5m: number;
     failed_5m: number;
   };
-  by_subtype: Record<string, { pending: number; claimed: number }>;
+  /** V2: by_capability (was by_subtype in v1) */
+  by_capability: Record<string, { pending: number; claimed: number }>;
+  /** @deprecated Use by_capability instead - aliased for backwards compat */
+  by_subtype?: Record<string, { pending: number; claimed: number }>;
   recent: Array<{
     task_id: string;
-    task_subtype: string | null;
+    /** V2: capability_identity (was task_subtype in v1) */
+    capability_identity: string;
+    /** @deprecated Use capability_identity instead */
+    task_subtype?: string | null;
     status: string;
-    runner_id: string | null;
+    /** V2: claimed_by (was runner_id in v1) */
+    claimed_by: string | null;
+    /** @deprecated Use claimed_by instead */
+    runner_id?: string | null;
     created_at: string;
     claimed_at: string | null;
-    lease_expires_at: string | null;
+    /** V2: deadline_at (was lease_expires_at in v1) */
+    deadline_at: string | null;
+    /** @deprecated Use deadline_at instead */
+    lease_expires_at?: string | null;
   }>;
   active_runners: Array<{
     runner_id: string;
     last_claimed_at: string;
   }>;
+  /** Warning banner to display in UI */
+  warning: string | null;
 }
 
 // =============================================================================

@@ -364,22 +364,22 @@ export function RunnerPage({ darkMode }: RunnerPageProps): ReactElement {
             </div>
           </div>
 
-          {/* By Subtype */}
-          {Object.keys(stats.by_subtype).length > 0 && (
+          {/* By Capability */}
+          {Object.keys(stats.by_capability || {}).length > 0 && (
             <div style={{ ...styles.card, marginBottom: '16px' }}>
-              <div style={styles.cardTitle}>By Subtype</div>
+              <div style={styles.cardTitle}>By Capability</div>
               <table style={styles.table}>
                 <thead>
                   <tr>
-                    <th style={styles.th}>Subtype</th>
+                    <th style={styles.th}>Capability</th>
                     <th style={{ ...styles.th, textAlign: 'right' }}>Pending</th>
                     <th style={{ ...styles.th, textAlign: 'right' }}>Claimed</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.entries(stats.by_subtype).map(([subtype, data]) => (
-                    <tr key={subtype}>
-                      <td style={{ ...styles.td, fontFamily: 'monospace' }}>{subtype}</td>
+                  {Object.entries(stats.by_capability || {}).map(([capability, data]) => (
+                    <tr key={capability}>
+                      <td style={{ ...styles.td, fontFamily: 'monospace' }}>{capability}</td>
                       <td style={{ ...styles.td, textAlign: 'right', color: data.pending > 0 ? colors.yellow : colors.textMuted }}>
                         {data.pending}
                       </td>
@@ -403,7 +403,7 @@ export function RunnerPage({ darkMode }: RunnerPageProps): ReactElement {
                 <thead>
                   <tr>
                     <th style={styles.th}>Task ID</th>
-                    <th style={styles.th}>Subtype</th>
+                    <th style={styles.th}>Capability</th>
                     <th style={styles.th}>Status</th>
                     <th style={styles.th}>Runner</th>
                     <th style={styles.th}>Created</th>
@@ -416,13 +416,13 @@ export function RunnerPage({ darkMode }: RunnerPageProps): ReactElement {
                     return (
                       <tr key={t.task_id}>
                         <td style={{ ...styles.td, fontFamily: 'monospace' }}>{shortId(t.task_id)}</td>
-                        <td style={{ ...styles.td, fontFamily: 'monospace' }}>{t.task_subtype || 'default'}</td>
+                        <td style={{ ...styles.td, fontFamily: 'monospace' }}>{t.capability_identity || 'unknown'}</td>
                         <td style={styles.td}>
                           <span style={{ ...styles.statusBadge, background: statusColor.bg, color: statusColor.text }}>
                             {t.status}
                           </span>
                         </td>
-                        <td style={{ ...styles.td, fontFamily: 'monospace' }}>{shortId(t.runner_id)}</td>
+                        <td style={{ ...styles.td, fontFamily: 'monospace' }}>{shortId(t.claimed_by)}</td>
                         <td style={{ ...styles.td, color: colors.textMuted }}>{timeAgo(t.created_at)}</td>
                         <td style={{ ...styles.td, color: colors.textMuted }}>{t.claimed_at ? timeAgo(t.claimed_at) : '-'}</td>
                       </tr>

@@ -35,6 +35,34 @@ interface DemoState {
   error: string | null;
 }
 
+// DocGen state persisted across tab switches
+interface DocGenPersistedState {
+  runId: string | null;
+  folder: string | null;
+}
+
+const DOCGEN_STORAGE_KEY = 'ekka.docgen.state';
+
+function loadDocGenState(): DocGenPersistedState {
+  try {
+    const saved = localStorage.getItem(DOCGEN_STORAGE_KEY);
+    if (saved) {
+      return JSON.parse(saved) as DocGenPersistedState;
+    }
+  } catch {
+    // Ignore parse errors
+  }
+  return { runId: null, folder: null };
+}
+
+function saveDocGenState(state: DocGenPersistedState): void {
+  try {
+    localStorage.setItem(DOCGEN_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 export function DemoApp(): ReactElement {
   const [selectedPage, setSelectedPage] = useState<Page>('path-permissions');
   const [darkMode, setDarkMode] = useState<boolean>(() => {
@@ -50,6 +78,14 @@ export function DemoApp(): ReactElement {
     connected: false,
     error: null,
   });
+
+  // DocGen state - persisted to localStorage
+  const [docGenState, setDocGenState] = useState<DocGenPersistedState>(loadDocGenState);
+
+  const handleDocGenStateChange = (newState: DocGenPersistedState) => {
+    setDocGenState(newState);
+    saveDocGenState(newState);
+  };
 
   useEffect(() => {
     void initializeApp();
@@ -251,7 +287,13 @@ export function DemoApp(): ReactElement {
       {state.error && <div style={errorStyle}>{state.error}</div>}
       {selectedPage === 'path-permissions' && <PathPermissionsPage darkMode={darkMode} />}
       {selectedPage === 'vault' && <VaultPage darkMode={darkMode} />}
-      {selectedPage === 'doc-gen' && <DocGenPage darkMode={darkMode} />}
+      {selectedPage === 'doc-gen' && (
+        <DocGenPage
+          darkMode={darkMode}
+          persistedState={docGenState}
+          onStateChange={handleDocGenStateChange}
+        />
+      )}
       {selectedPage === 'runner' && <RunnerPage darkMode={darkMode} />}
       {selectedPage === 'audit-log' && <AuditLogPage darkMode={darkMode} />}
       {selectedPage === 'system' && <SystemPage darkMode={darkMode} />}

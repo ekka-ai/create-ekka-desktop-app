@@ -1,43 +1,141 @@
 /**
  * Documentation Generation Page
  *
- * Allows users to select a source folder and generate documentation
- * using the ekka-docgen-basic prompt via wf_prompt_run workflow.
+ * V2 EXECUTION RUNS ONLY - No V1/Temporal fallback.
+ * - Uses POST /engine/execution/runs (V2)
+ * - Status from GET /engine/admin/execution/runs/{id}
+ * - Legacy V1 runs are hidden (not fetched)
  */
 
 import { useState, useEffect, useRef, type CSSProperties, type ReactElement } from 'react';
 import {
-  createWorkflowRun,
-  getWorkflowRun,
-  type WorkflowRun,
-  type DebugBundleInfo,
-} from '../../ekka/ops/workflowRuns';
-import * as debugOps from '../../ekka/ops/debug';
+  startExecutionRun,
+  getExecutionRun,
+  DOCGEN_BASIC_PLAN_ID,
+  type ExecutionRun,
+} from '../../ekka/ops/executionRuns';
+
+// =============================================================================
+// TYPES
+// =============================================================================
 
 interface DocGenPageProps {
   darkMode: boolean;
+  persistedState?: { runId: string | null; folder: string | null };
+  onStateChange?: (state: { runId: string | null; folder: string | null }) => void;
 }
 
-type GenerationStatus = 'idle' | 'queued' | 'running' | 'completed' | 'failed';
+// V2 only - no legacy types
+interface RunWithStatus {
+  id: string;
+  run: ExecutionRun | null;
+  loading: boolean;
+  error: string | null;
+  isLegacy?: boolean; // Flag for pre-V2 runs (hidden from UI)
+}
 
-// Hardcoded prompt configuration - NO prompt selection UI
-const PROMPT_CONFIG = {
-  provider: 'opik',
-  prompt_slug: 'ekka-docgen-basic',
-  prompt_version: '1',
-} as const;
+const STORAGE_KEY = 'ekka.docgen.runs';
+const MAX_RUNS = 10;
 
-export function DocGenPage({ darkMode }: DocGenPageProps): ReactElement {
-  const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
-  const [status, setStatus] = useState<GenerationStatus>('idle');
-  const [workflowRunId, setWorkflowRunId] = useState<string | null>(null);
-  const [workflowRun, setWorkflowRun] = useState<WorkflowRun | null>(null);
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+function loadRunIds(): string[] {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved) as string[];
+      return Array.isArray(parsed) ? parsed.slice(0, MAX_RUNS) : [];
+    }
+  } catch {
+    // Ignore parse errors
+  }
+  return [];
+}
+
+function saveRunIds(ids: string[]): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(ids.slice(0, MAX_RUNS)));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function formatDate(dateStr: string): string {
+  try {
+    const date = new Date(dateStr);
+    return date.toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return dateStr;
+  }
+}
+
+function shortId(id: string): string {
+  return id.slice(0, 8);
+}
+
+// Helper to extract output text from V2 execution run
+function getOutputText(run: ExecutionRun | null): string | undefined {
+  if (!run?.result) return undefined;
+
+  const result = run.result as Record<string, unknown>;
+
+  // V2 ExecutionRun has result.result.output_text (from task output)
+  if (result.result && typeof result.result === 'object') {
+    const inner = result.result as Record<string, unknown>;
+    if ('output_text' in inner) {
+      return inner.output_text as string | undefined;
+    }
+  }
+
+  // Also try direct output_text on result
+  if ('output_text' in result) {
+    return result.output_text as string | undefined;
+  }
+
+  return undefined;
+}
+
+// =============================================================================
+// MAIN COMPONENT
+// =============================================================================
+
+export function DocGenPage({ darkMode, persistedState, onStateChange }: DocGenPageProps): ReactElement {
+  // Folder selection
+  const [selectedFolder, setSelectedFolder] = useState<string | null>(persistedState?.folder ?? null);
+
+  // Run IDs list (persisted to localStorage)
+  const [runIds, setRunIds] = useState<string[]>(() => {
+    // Migrate from old single-run state if present
+    const oldRunId = persistedState?.runId;
+    const existingIds = loadRunIds();
+    if (oldRunId && !existingIds.includes(oldRunId)) {
+      const newIds = [oldRunId, ...existingIds].slice(0, MAX_RUNS);
+      saveRunIds(newIds);
+      return newIds;
+    }
+    return existingIds;
+  });
+
+  // Run statuses (fetched from backend)
+  const [runs, setRuns] = useState<Map<string, RunWithStatus>>(new Map());
+
+  // UI state
   const [error, setError] = useState<string | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState(false);
-  const [isDevMode, setIsDevMode] = useState(false);
-  const [pathCopySuccess, setPathCopySuccess] = useState(false);
-  const pollingRef = useRef<number | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
+  // Debounce for Generate button
+  const generateDebounceRef = useRef(false);
+
+  // Colors
   const colors = {
     text: darkMode ? '#ffffff' : '#1d1d1f',
     textMuted: darkMode ? '#98989d' : '#6e6e73',
@@ -147,6 +245,16 @@ export function DocGenPage({ darkMode }: DocGenPageProps): ReactElement {
       transition: 'opacity 0.15s ease',
       whiteSpace: 'nowrap' as const,
     },
+    buttonSmall: {
+      padding: '6px 12px',
+      fontSize: '12px',
+      fontWeight: 500,
+      color: colors.accent,
+      background: 'transparent',
+      border: `1px solid ${colors.border}`,
+      borderRadius: '6px',
+      cursor: 'pointer',
+    },
     buttonDisabled: {
       opacity: 0.5,
       cursor: 'not-allowed',
@@ -160,60 +268,34 @@ export function DocGenPage({ darkMode }: DocGenPageProps): ReactElement {
       fontSize: '13px',
       color: darkMode ? '#fca5a5' : '#991b1b',
     },
-    progressCard: {
-      padding: '20px',
-      background: colors.bg,
-      border: `1px solid ${colors.border}`,
-      borderRadius: '12px',
+    table: {
+      width: '100%',
+      borderCollapse: 'collapse' as const,
+      fontSize: '13px',
     },
-    progressHeader: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '12px',
-      marginBottom: '16px',
-    },
-    progressSpinner: {
-      width: '20px',
-      height: '20px',
-      border: `2px solid ${colors.border}`,
-      borderTopColor: colors.accent,
-      borderRadius: '50%',
-      animation: 'spin 1s linear infinite',
-    },
-    progressTitle: {
-      fontSize: '15px',
+    th: {
+      textAlign: 'left' as const,
+      padding: '10px 12px',
+      borderBottom: `1px solid ${colors.border}`,
+      color: colors.textMuted,
       fontWeight: 600,
+      fontSize: '11px',
+      textTransform: 'uppercase' as const,
+      letterSpacing: '0.05em',
+    },
+    td: {
+      padding: '12px',
+      borderBottom: `1px solid ${colors.border}`,
       color: colors.text,
     },
-    progressSteps: {
-      display: 'flex',
-      gap: '8px',
-      flexWrap: 'wrap' as const,
-    },
-    progressStep: {
-      display: 'flex',
+    statusBadge: {
+      display: 'inline-flex',
       alignItems: 'center',
-      gap: '6px',
-      padding: '6px 12px',
-      borderRadius: '6px',
-      fontSize: '12px',
-      fontWeight: 500,
-    },
-    stepActive: {
-      background: darkMode ? 'rgba(10, 132, 255, 0.15)' : 'rgba(0, 122, 255, 0.1)',
-      color: colors.accent,
-    },
-    stepComplete: {
-      background: darkMode ? 'rgba(48, 209, 88, 0.15)' : 'rgba(52, 199, 89, 0.1)',
-      color: colors.green,
-    },
-    stepPending: {
-      background: darkMode ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.03)',
-      color: colors.textMuted,
-    },
-    stepFailed: {
-      background: darkMode ? 'rgba(255, 69, 58, 0.15)' : 'rgba(255, 59, 48, 0.1)',
-      color: colors.red,
+      gap: '4px',
+      padding: '4px 8px',
+      borderRadius: '4px',
+      fontSize: '11px',
+      fontWeight: 600,
     },
     outputCard: {
       background: colors.bg,
@@ -229,20 +311,9 @@ export function DocGenPage({ darkMode }: DocGenPageProps): ReactElement {
       borderBottom: `1px solid ${colors.border}`,
       background: darkMode ? 'rgba(255, 255, 255, 0.02)' : 'rgba(0, 0, 0, 0.02)',
     },
-    outputMeta: {
-      display: 'flex',
-      gap: '16px',
-      fontSize: '12px',
-      color: colors.textMuted,
-    },
-    outputMetaItem: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '4px',
-    },
     outputContent: {
       padding: '20px',
-      maxHeight: '500px',
+      maxHeight: '400px',
       overflowY: 'auto' as const,
       fontSize: '14px',
       lineHeight: 1.7,
@@ -250,51 +321,65 @@ export function DocGenPage({ darkMode }: DocGenPageProps): ReactElement {
       whiteSpace: 'pre-wrap' as const,
       fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif',
     },
-    badge: {
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: '4px',
-      padding: '4px 8px',
-      borderRadius: '4px',
-      fontSize: '11px',
-      fontWeight: 600,
-    },
-    badgeGreen: {
-      background: darkMode ? 'rgba(48, 209, 88, 0.15)' : 'rgba(52, 199, 89, 0.12)',
-      color: colors.green,
-    },
-    badgeRed: {
-      background: darkMode ? 'rgba(255, 69, 58, 0.15)' : 'rgba(255, 59, 48, 0.12)',
-      color: colors.red,
-    },
-    copyButton: {
-      padding: '6px 12px',
-      fontSize: '12px',
-      fontWeight: 500,
-      color: colors.accent,
-      background: 'transparent',
-      border: `1px solid ${colors.border}`,
-      borderRadius: '6px',
-      cursor: 'pointer',
-      display: 'flex',
-      alignItems: 'center',
-      gap: '4px',
+    emptyState: {
+      padding: '40px 20px',
+      textAlign: 'center' as const,
+      color: colors.textMuted,
+      fontSize: '14px',
     },
   };
 
-  // Check dev mode on mount
+  // Fetch status for all runs on mount and when runIds changes
   useEffect(() => {
-    debugOps.isDevMode().then(setIsDevMode).catch(() => setIsDevMode(false));
-  }, []);
+    if (runIds.length > 0) {
+      void fetchAllRunStatuses();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Only re-fetch when runIds list changes
+  }, [runIds.length]);
 
-  // Cleanup polling on unmount
+  // Sync folder to parent state
   useEffect(() => {
-    return () => {
-      if (pollingRef.current) {
-        clearInterval(pollingRef.current);
-      }
-    };
-  }, []);
+    onStateChange?.({ runId: null, folder: selectedFolder });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Only sync when folder changes
+  }, [selectedFolder]);
+
+  // Fetch status for all runs (V2 only - no V1 fallback)
+  const fetchAllRunStatuses = async () => {
+    setIsRefreshing(true);
+
+    const newRuns = new Map<string, RunWithStatus>();
+    const legacyIds: string[] = [];
+
+    await Promise.all(
+      runIds.map(async (id) => {
+        try {
+          const run = await getExecutionRun(id);
+          newRuns.set(id, { id, run, loading: false, error: null });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Failed to fetch';
+          // Only treat as legacy if it's a 404 (not found) - other errors keep the entry
+          const isNotFound = message.includes('404') || message.includes('not found') || message.includes('Not Found');
+          if (isNotFound) {
+            // Legacy V1 run - mark for removal
+            legacyIds.push(id);
+          } else {
+            // Network/server error - keep entry with error state
+            newRuns.set(id, { id, run: null, loading: false, error: message });
+          }
+        }
+      })
+    );
+
+    // Auto-clean legacy V1 run IDs from storage (they're dead, no point keeping them)
+    if (legacyIds.length > 0) {
+      const cleanedIds = runIds.filter(id => !legacyIds.includes(id));
+      setRunIds(cleanedIds);
+      saveRunIds(cleanedIds);
+    }
+
+    setRuns(newRuns);
+    setIsRefreshing(false);
+  };
 
   // Handle folder selection
   const handleSelectFolder = async () => {
@@ -304,10 +389,6 @@ export function DocGenPage({ darkMode }: DocGenPageProps): ReactElement {
       const selected = await open({ directory: true, multiple: false });
       if (selected && typeof selected === 'string') {
         setSelectedFolder(selected);
-        // Reset state when new folder selected
-        setStatus('idle');
-        setWorkflowRunId(null);
-        setWorkflowRun(null);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -315,94 +396,91 @@ export function DocGenPage({ darkMode }: DocGenPageProps): ReactElement {
     }
   };
 
-  // Start generation
+  // Handle generate - STATELESS action (V2 Execution Plan API)
   const handleGenerate = async () => {
     if (!selectedFolder) return;
 
-    // Stop any existing polling
-    if (pollingRef.current) {
-      clearInterval(pollingRef.current);
-      pollingRef.current = null;
-    }
+    // Debounce: prevent double-click
+    if (generateDebounceRef.current) return;
+    generateDebounceRef.current = true;
+    setTimeout(() => { generateDebounceRef.current = false; }, 500);
 
     setError(null);
-    setStatus('queued');
-    setWorkflowRun(null);
 
     try {
-      // Create workflow run - DO NOT log the input
-      // JWT is handled internally by the ops layer
-      const response = await createWorkflowRun({
-        type: 'wf_prompt_run',
-        confidentiality: 'confidential',
-        context: {
-          prompt_ref: PROMPT_CONFIG,
-          variables: { input: selectedFolder },
+      // V2: Use execution plan run-start API
+      const response = await startExecutionRun({
+        plan_id: DOCGEN_BASIC_PLAN_ID,
+        inputs: {
+          input: selectedFolder,
         },
       });
 
-      setWorkflowRunId(response.id);
+      const runId = response.run_id;
 
-      // Start polling
-      startPolling(response.id);
+      // Add new run ID to list (newest first)
+      const newIds = [runId, ...runIds.filter(id => id !== runId)].slice(0, MAX_RUNS);
+      setRunIds(newIds);
+      saveRunIds(newIds);
+
+      // Add initial status for new run
+      setRuns(prev => {
+        const newMap = new Map(prev);
+        newMap.set(runId, {
+          id: runId,
+          run: {
+            id: runId,
+            plan_id: DOCGEN_BASIC_PLAN_ID,
+            plan_identity: 'system/ekka/docgen.basic@1.0.0',
+            status: 'running',
+            current_step_index: 0,
+            total_steps: 1,
+            completed_steps: 0,
+            progress: 0,
+            created_at: new Date().toISOString(),
+          } as ExecutionRun,
+          loading: false,
+          error: null,
+        });
+        return newMap;
+      });
+
+      // Immediately fetch actual status
+      try {
+        const run = await getExecutionRun(runId);
+        setRuns(prev => {
+          const newMap = new Map(prev);
+          newMap.set(runId, { id: runId, run, loading: false, error: null });
+          return newMap;
+        });
+      } catch {
+        // Ignore - will be fetched on next refresh
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to start generation';
       setError(message);
-      setStatus('failed');
     }
   };
 
-  // Poll for status updates
-  const startPolling = (id: string) => {
-    const poll = async () => {
-      try {
-        // JWT is handled internally by the ops layer
-        const run = await getWorkflowRun(id);
-        setWorkflowRun(run);
+  // Handle refresh
+  const handleRefresh = () => {
+    void fetchAllRunStatuses();
+  };
 
-        // Update status based on workflow state
-        if (run.status === 'completed') {
-          setStatus('completed');
-          if (pollingRef.current) {
-            clearInterval(pollingRef.current);
-            pollingRef.current = null;
-          }
-        } else if (run.status === 'failed') {
-          setStatus('failed');
-          setError(run.error || 'Workflow failed');
-          if (pollingRef.current) {
-            clearInterval(pollingRef.current);
-            pollingRef.current = null;
-          }
-        } else if (run.status === 'running' || run.progress > 0) {
-          setStatus('running');
-        } else {
-          setStatus('queued');
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to fetch status';
-        setError(message);
-        setStatus('failed');
-        if (pollingRef.current) {
-          clearInterval(pollingRef.current);
-          pollingRef.current = null;
-        }
-      }
-    };
+  // Handle view result
+  const handleViewResult = (runId: string) => {
+    setSelectedRunId(selectedRunId === runId ? null : runId);
+  };
 
-    // Initial poll
-    void poll();
-
-    // Poll every 1.5 seconds
-    pollingRef.current = window.setInterval(poll, 1500);
+  // Handle retry (create new run for same folder)
+  const handleRetry = () => {
+    void handleGenerate();
   };
 
   // Copy output to clipboard
-  const handleCopyOutput = async () => {
-    if (!workflowRun?.result?.output_text) return;
-
+  const handleCopyOutput = async (text: string) => {
     try {
-      await navigator.clipboard.writeText(workflowRun.result?.output_text || '');
+      await navigator.clipboard.writeText(text);
       setCopySuccess(true);
       setTimeout(() => setCopySuccess(false), 2000);
     } catch {
@@ -410,31 +488,66 @@ export function DocGenPage({ darkMode }: DocGenPageProps): ReactElement {
     }
   };
 
-  const isGenerating = status === 'queued' || status === 'running';
-  const canGenerate = selectedFolder && !isGenerating;
+  // Get status badge style
+  const getStatusStyle = (status: string): CSSProperties => {
+    switch (status) {
+      case 'completed':
+        return {
+          background: darkMode ? 'rgba(48, 209, 88, 0.15)' : 'rgba(52, 199, 89, 0.12)',
+          color: colors.green,
+        };
+      case 'failed':
+        return {
+          background: darkMode ? 'rgba(255, 69, 58, 0.15)' : 'rgba(255, 59, 48, 0.12)',
+          color: colors.red,
+        };
+      case 'running':
+        return {
+          background: darkMode ? 'rgba(10, 132, 255, 0.15)' : 'rgba(0, 122, 255, 0.1)',
+          color: colors.accent,
+        };
+      default: // pending, dispatched, queued
+        return {
+          background: darkMode ? 'rgba(255, 159, 10, 0.15)' : 'rgba(255, 149, 0, 0.12)',
+          color: colors.orange,
+        };
+    }
+  };
+
+  // Get display status
+  const getDisplayStatus = (status: string): string => {
+    switch (status) {
+      case 'pending':
+      case 'dispatched':
+        return 'Queued';
+      case 'running':
+        return 'Running';
+      case 'completed':
+        return 'Complete';
+      case 'failed':
+        return 'Failed';
+      case 'cancelled':
+        return 'Cancelled';
+      default:
+        return status;
+    }
+  };
+
+  const selectedRun = selectedRunId ? runs.get(selectedRunId) : null;
+  const canGenerate = !!selectedFolder;
 
   return (
     <div style={styles.container}>
-      {/* CSS for spinner animation */}
-      <style>
-        {`
-          @keyframes spin {
-            to { transform: rotate(360deg); }
-          }
-        `}
-      </style>
-
       <header style={styles.header}>
         <h1 style={styles.title}>Generate Documentation</h1>
         <p style={styles.subtitle}>
           Select a source folder to automatically generate documentation using AI.
-          The generated documentation will be displayed below.
         </p>
       </header>
 
       {error && <div style={styles.error}>{error}</div>}
 
-      {/* Section: Folder Selection */}
+      {/* Section: Folder Selection & Generate */}
       <div style={styles.section}>
         <div style={styles.sectionHeader}>
           <span style={styles.sectionTitle}>Source Folder</span>
@@ -452,7 +565,6 @@ export function DocGenPage({ darkMode }: DocGenPageProps): ReactElement {
             <button
               onClick={() => void handleSelectFolder()}
               style={styles.buttonSecondary}
-              disabled={isGenerating}
             >
               Browse...
             </button>
@@ -467,88 +579,108 @@ export function DocGenPage({ darkMode }: DocGenPageProps): ReactElement {
               }}
               disabled={!canGenerate}
             >
-              {isGenerating ? 'Generating...' : 'Generate Documentation'}
+              Generate Documentation
             </button>
           </div>
         </div>
       </div>
 
-      {/* Section: Progress */}
-      {(status !== 'idle' || workflowRunId) && (
-        <div style={styles.section}>
-          <div style={styles.sectionHeader}>
-            <span style={styles.sectionTitle}>Progress</span>
-            <div style={styles.sectionLine} />
-          </div>
-          <div style={styles.progressCard}>
-            <div style={styles.progressHeader}>
-              {isGenerating && <div style={styles.progressSpinner} />}
-              {status === 'completed' && <CheckIcon color={colors.green} />}
-              {status === 'failed' && <ErrorIcon color={colors.red} />}
-              <span style={styles.progressTitle}>
-                {status === 'queued' && 'Queued'}
-                {status === 'running' && 'Processing...'}
-                {status === 'completed' && 'Completed'}
-                {status === 'failed' && 'Failed'}
-              </span>
-              {workflowRunId && (
-                <span style={{ fontSize: '11px', color: colors.textMuted, fontFamily: 'monospace' }}>
-                  ID: {workflowRunId.slice(0, 8)}...
-                </span>
-              )}
-            </div>
-            <div style={styles.progressSteps}>
-              <div
-                style={{
-                  ...styles.progressStep,
-                  ...(status === 'queued' ? styles.stepActive : styles.stepComplete),
-                }}
-              >
-                {status !== 'queued' && <CheckIcon color={colors.green} size={12} />}
-                Queued
-              </div>
-              <div
-                style={{
-                  ...styles.progressStep,
-                  ...(status === 'running'
-                    ? styles.stepActive
-                    : status === 'completed' || status === 'failed'
-                      ? status === 'failed'
-                        ? styles.stepFailed
-                        : styles.stepComplete
-                      : styles.stepPending),
-                }}
-              >
-                {status === 'completed' && <CheckIcon color={colors.green} size={12} />}
-                {status === 'failed' && <ErrorIcon color={colors.red} size={12} />}
-                Running
-              </div>
-              <div
-                style={{
-                  ...styles.progressStep,
-                  ...(status === 'completed'
-                    ? styles.stepComplete
-                    : status === 'failed'
-                      ? styles.stepFailed
-                      : styles.stepPending),
-                }}
-              >
-                {status === 'completed' && <CheckIcon color={colors.green} size={12} />}
-                {status === 'failed' && <ErrorIcon color={colors.red} size={12} />}
-                {status === 'completed' ? 'Completed' : status === 'failed' ? 'Failed' : 'Complete'}
-              </div>
-            </div>
-            {workflowRun && (
-              <div style={{ marginTop: '12px', fontSize: '12px', color: colors.textMuted }}>
-                Progress: {workflowRun.progress}%
-              </div>
-            )}
-          </div>
+      {/* Section: Runs Table */}
+      <div style={styles.section}>
+        <div style={styles.sectionHeader}>
+          <span style={styles.sectionTitle}>Execution Runs</span>
+          <div style={styles.sectionLine} />
+          <button
+            onClick={handleRefresh}
+            style={{
+              ...styles.buttonSmall,
+              opacity: isRefreshing ? 0.5 : 1,
+            }}
+            disabled={isRefreshing}
+          >
+            {isRefreshing ? 'Refreshing...' : 'Refresh'}
+          </button>
         </div>
-      )}
+        <div style={styles.card}>
+          {runIds.length === 0 ? (
+            <div style={styles.emptyState}>
+              No runs yet. Click "Generate Documentation" to start.
+            </div>
+          ) : (
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={styles.th}>Run ID</th>
+                  <th style={styles.th}>Created</th>
+                  <th style={styles.th}>Status</th>
+                  <th style={styles.th}>Progress</th>
+                  <th style={styles.th}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {runIds.map((id) => {
+                  const runData = runs.get(id);
+                  const run = runData?.run;
+                  const status = run?.status ?? 'pending';
+                  const progress = run?.progress ?? 0;
+                  const createdAt = run?.created_at ?? '';
+                  const isComplete = status === 'completed';
+                  const isFailed = status === 'failed';
+                  const isSelected = selectedRunId === id;
 
-      {/* Section: Output */}
-      {status === 'completed' && workflowRun?.result?.output_text && (
+                  return (
+                    <tr key={id} style={{ background: isSelected ? (darkMode ? 'rgba(10, 132, 255, 0.1)' : 'rgba(0, 122, 255, 0.05)') : 'transparent' }}>
+                      <td style={{ ...styles.td, fontFamily: 'monospace', fontSize: '12px' }}>
+                        {shortId(id)}
+                      </td>
+                      <td style={{ ...styles.td, color: colors.textMuted }}>
+                        {createdAt ? formatDate(createdAt) : '—'}
+                      </td>
+                      <td style={styles.td}>
+                        <span style={{ ...styles.statusBadge, ...getStatusStyle(status) }}>
+                          {getDisplayStatus(status)}
+                        </span>
+                      </td>
+                      <td style={{ ...styles.td, color: colors.textMuted }}>
+                        {progress > 0 && progress < 100 ? `${progress}%` : '—'}
+                      </td>
+                      <td style={styles.td}>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          {isComplete && (
+                            <button
+                              onClick={() => handleViewResult(id)}
+                              style={styles.buttonSmall}
+                            >
+                              {isSelected ? 'Hide' : 'View'}
+                            </button>
+                          )}
+                          {isFailed && (
+                            <button
+                              onClick={() => handleViewResult(id)}
+                              style={styles.buttonSmall}
+                            >
+                              {isSelected ? 'Hide' : 'Details'}
+                            </button>
+                          )}
+                          <button
+                            onClick={handleRetry}
+                            style={styles.buttonSmall}
+                          >
+                            Retry
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+
+      {/* Section: Selected Run Output */}
+      {selectedRun?.run && selectedRun.run.status === 'completed' && getOutputText(selectedRun.run) && (
         <div style={styles.section}>
           <div style={styles.sectionHeader}>
             <span style={styles.sectionTitle}>Generated Documentation</span>
@@ -556,41 +688,25 @@ export function DocGenPage({ darkMode }: DocGenPageProps): ReactElement {
           </div>
           <div style={styles.outputCard}>
             <div style={styles.outputHeader}>
-              <div style={styles.outputMeta}>
-                <div style={styles.outputMetaItem}>
-                  <span style={{ ...styles.badge, ...styles.badgeGreen }}>Completed</span>
-                </div>
-                <div style={styles.outputMetaItem}>
-                  <span style={{ color: colors.textDim }}>ID:</span>
-                  <code style={{ fontFamily: 'monospace', fontSize: '11px' }}>
-                    {workflowRunId}
-                  </code>
-                </div>
-              </div>
+              <span style={{ fontSize: '12px', color: colors.textMuted }}>
+                Run: {shortId(selectedRun.id)}
+              </span>
               <button
-                onClick={() => void handleCopyOutput()}
-                style={styles.copyButton}
+                onClick={() => void handleCopyOutput(getOutputText(selectedRun.run) ?? '')}
+                style={styles.buttonSmall}
               >
-                {copySuccess ? (
-                  <>
-                    <CheckIcon color={colors.green} size={14} />
-                    Copied!
-                  </>
-                ) : (
-                  <>
-                    <CopyIcon />
-                    Copy Output
-                  </>
-                )}
+                {copySuccess ? 'Copied!' : 'Copy'}
               </button>
             </div>
-            <div style={styles.outputContent}>{workflowRun.result?.output_text}</div>
+            <div style={styles.outputContent}>
+              {getOutputText(selectedRun.run)}
+            </div>
           </div>
         </div>
       )}
 
-      {/* Section: Error Details */}
-      {status === 'failed' && workflowRun && (
+      {/* Section: Selected Run Error */}
+      {selectedRun?.run && selectedRun.run.status === 'failed' && (
         <div style={styles.section}>
           <div style={styles.sectionHeader}>
             <span style={styles.sectionTitle}>Error Details</span>
@@ -598,277 +714,18 @@ export function DocGenPage({ darkMode }: DocGenPageProps): ReactElement {
           </div>
           <div style={{ ...styles.card, borderColor: colors.red }}>
             <div style={{ marginBottom: '8px' }}>
-              <span style={{ ...styles.badge, ...styles.badgeRed }}>
+              <span style={{ ...styles.statusBadge, ...getStatusStyle('failed') }}>
                 ERROR
               </span>
             </div>
             <p style={{ fontSize: '14px', color: colors.text, margin: 0 }}>
-              {workflowRun.error || 'An unknown error occurred'}
+              {selectedRun.run.error || 'An unknown error occurred'}
             </p>
           </div>
         </div>
       )}
 
-      {/* Section: Debug Bundle (Dev Mode Only) */}
-      {status === 'failed' && isDevMode && workflowRun?.result?.debug_bundle && (
-        <DebugBundleSection
-          debugBundle={workflowRun.result.debug_bundle}
-          darkMode={darkMode}
-          colors={colors}
-          pathCopySuccess={pathCopySuccess}
-          onCopyPath={async () => {
-            try {
-              await navigator.clipboard.writeText(workflowRun.result?.debug_bundle?.debug_bundle_ref || '');
-              setPathCopySuccess(true);
-              setTimeout(() => setPathCopySuccess(false), 2000);
-            } catch {
-              setError('Failed to copy path to clipboard');
-            }
-          }}
-          onOpenFolder={async () => {
-            try {
-              await debugOps.openFolder(workflowRun.result?.debug_bundle?.debug_bundle_ref || '');
-            } catch (err) {
-              setError(err instanceof Error ? err.message : 'Failed to open folder');
-            }
-          }}
-        />
-      )}
     </div>
   );
 }
 
-// =============================================================================
-// Debug Bundle Section (Dev Mode Only)
-// =============================================================================
-
-interface DebugBundleSectionProps {
-  debugBundle: DebugBundleInfo;
-  darkMode: boolean;
-  colors: Record<string, string>;
-  pathCopySuccess: boolean;
-  onCopyPath: () => void;
-  onOpenFolder: () => void;
-}
-
-function DebugBundleSection({
-  debugBundle,
-  darkMode,
-  colors,
-  pathCopySuccess,
-  onCopyPath,
-  onOpenFolder,
-}: DebugBundleSectionProps): ReactElement {
-  const styles: Record<string, CSSProperties> = {
-    section: {
-      marginBottom: '28px',
-    },
-    sectionHeader: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '8px',
-      marginBottom: '12px',
-    },
-    sectionTitle: {
-      fontSize: '11px',
-      fontWeight: 600,
-      color: colors.textMuted,
-      textTransform: 'uppercase' as const,
-      letterSpacing: '0.05em',
-    },
-    sectionLine: {
-      flex: 1,
-      height: '1px',
-      background: colors.border,
-    },
-    card: {
-      background: darkMode ? '#1c1c1e' : '#fafafa',
-      border: `1px solid ${darkMode ? '#48484a' : '#d1d1d6'}`,
-      borderRadius: '12px',
-      padding: '16px',
-    },
-    devBadge: {
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: '4px',
-      padding: '3px 8px',
-      borderRadius: '4px',
-      fontSize: '10px',
-      fontWeight: 600,
-      background: darkMode ? 'rgba(191, 90, 242, 0.15)' : 'rgba(175, 82, 222, 0.12)',
-      color: darkMode ? '#bf5af2' : '#af52de',
-      marginBottom: '12px',
-    },
-    pathBox: {
-      padding: '10px 12px',
-      background: darkMode ? '#2c2c2e' : '#ffffff',
-      border: `1px solid ${darkMode ? '#3a3a3c' : '#e5e5e5'}`,
-      borderRadius: '6px',
-      fontSize: '12px',
-      fontFamily: 'SF Mono, Monaco, Consolas, monospace',
-      color: colors.text,
-      marginBottom: '12px',
-      wordBreak: 'break-all' as const,
-    },
-    row: {
-      display: 'flex',
-      gap: '12px',
-      marginBottom: '12px',
-    },
-    metaItem: {
-      fontSize: '12px',
-      color: colors.textMuted,
-    },
-    metaLabel: {
-      fontWeight: 500,
-      marginRight: '4px',
-    },
-    metaValue: {
-      fontFamily: 'SF Mono, Monaco, Consolas, monospace',
-      fontSize: '11px',
-    },
-    filesList: {
-      display: 'flex',
-      flexWrap: 'wrap' as const,
-      gap: '6px',
-      marginBottom: '16px',
-    },
-    fileTag: {
-      padding: '4px 8px',
-      background: darkMode ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.04)',
-      borderRadius: '4px',
-      fontSize: '11px',
-      fontFamily: 'SF Mono, Monaco, Consolas, monospace',
-      color: colors.textMuted,
-    },
-    buttonRow: {
-      display: 'flex',
-      gap: '8px',
-    },
-    button: {
-      padding: '8px 14px',
-      fontSize: '12px',
-      fontWeight: 500,
-      color: colors.accent,
-      background: 'transparent',
-      border: `1px solid ${colors.border}`,
-      borderRadius: '6px',
-      cursor: 'pointer',
-      display: 'flex',
-      alignItems: 'center',
-      gap: '6px',
-    },
-  };
-
-  // Format bytes to human readable
-  const formatBytes = (bytes: number): string => {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  };
-
-  return (
-    <div style={styles.section}>
-      <div style={styles.sectionHeader}>
-        <span style={styles.sectionTitle}>Debug Bundle</span>
-        <div style={styles.sectionLine} />
-      </div>
-      <div style={styles.card}>
-        <div style={styles.devBadge}>
-          <span>🔧</span>
-          DEV MODE ONLY
-        </div>
-
-        <div style={{ fontSize: '11px', color: colors.textMuted, marginBottom: '8px' }}>
-          Path (Local)
-        </div>
-        <div style={styles.pathBox}>
-          {debugBundle.debug_bundle_ref}
-        </div>
-
-        <div style={styles.row}>
-          <div style={styles.metaItem}>
-            <span style={styles.metaLabel}>Size:</span>
-            <span style={styles.metaValue}>{formatBytes(debugBundle.raw_output_len)}</span>
-          </div>
-          <div style={styles.metaItem}>
-            <span style={styles.metaLabel}>SHA256:</span>
-            <span style={styles.metaValue}>{debugBundle.raw_output_sha256.slice(0, 16)}...</span>
-          </div>
-        </div>
-
-        <div style={{ fontSize: '11px', color: colors.textMuted, marginBottom: '6px' }}>
-          Files
-        </div>
-        <div style={styles.filesList}>
-          {debugBundle.files.map((file) => (
-            <span key={file} style={styles.fileTag}>{file}</span>
-          ))}
-        </div>
-
-        <div style={styles.buttonRow}>
-          <button onClick={onOpenFolder} style={styles.button}>
-            <FolderIcon />
-            Open Folder
-          </button>
-          <button onClick={onCopyPath} style={styles.button}>
-            {pathCopySuccess ? (
-              <>
-                <CheckIcon color={colors.green} size={14} />
-                Copied!
-              </>
-            ) : (
-              <>
-                <CopyIcon />
-                Copy Path
-              </>
-            )}
-          </button>
-        </div>
-
-        <div style={{ marginTop: '12px', fontSize: '11px', color: colors.textDim, fontStyle: 'italic' }}>
-          Raw output is NOT displayed here. Open the folder to inspect files.
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// =============================================================================
-// Icons
-// =============================================================================
-
-function FolderIcon(): ReactElement {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M.54 3.87.5 14a1 1 0 0 0 1 1h13a1 1 0 0 0 1-1V4.5a1 1 0 0 0-1-1H7.414A2 2 0 0 1 6 2.5L5.5 2a2 2 0 0 0-1.414-.586H1.5a1 1 0 0 0-1 1l.04 1.456z"/>
-    </svg>
-  );
-}
-
-// Icons
-function CheckIcon({ color, size = 16 }: { color: string; size?: number }): ReactElement {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill={color}>
-      <path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z" />
-    </svg>
-  );
-}
-
-function ErrorIcon({ color, size = 16 }: { color: string; size?: number }): ReactElement {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill={color}>
-      <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z" />
-      <path d="M7.002 11a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 4.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 4.995z" />
-    </svg>
-  );
-}
-
-function CopyIcon(): ReactElement {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M4 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H6z" />
-      <path d="M2 6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1H4z" />
-    </svg>
-  );
-}

@@ -1,26 +1,26 @@
 //! Desktop Node Session Runner
 //!
-//! Runner loop that uses Ed25519 node session authentication instead of internal service keys.
+//! Runner loop using node_id + node_secret authentication (NOT Ed25519).
 //!
 //! ## Architecture
 //!
-//! - Bootstrap node session FIRST before starting runner
-//! - Runner uses session token for all engine calls
-//! - Session is refreshed automatically when expired
-//! - Tenant/workspace comes from session (EKKA decides scope)
+//! - Uses node_credentials (vault) for authentication
+//! - Runner uses JWT token for all engine calls
+//! - Token refreshed automatically via node_secret auth when expired
+//! - Tenant/workspace comes from token (EKKA decides scope)
 //!
 //! ## Security
 //!
-//! - NO internal service keys used
+//! - NO Ed25519 keys required
 //! - NO environment variable credentials
-//! - Session tokens held in memory only
+//! - Tokens held in memory only
+//! - node_secret never logged
 
 #![allow(dead_code)] // API types and fields may not all be used yet
 
 use crate::config;
-use crate::node_auth::{
-    refresh_node_session, NodeSession, NodeSessionHolder, NodeSessionRunnerConfig,
-};
+use crate::node_auth::{NodeSession, NodeSessionHolder, NodeSessionRunnerConfig};
+use crate::node_credentials::authenticate_node;
 use crate::state::RunnerState;
 // Use ekka_runner_local for enhanced executor with debug bundle support
 use ekka_runner_local::dispatch::{classify_error, dispatch_task};
@@ -189,10 +189,8 @@ impl NodeSessionRunner {
 
     /// Get current valid session, refreshing if needed
     ///
+    /// Uses node_id + node_secret authentication (NOT Ed25519 keys).
     /// IMPORTANT: Uses spawn_blocking to avoid Tokio runtime panic.
-    /// The refresh_node_session function uses reqwest::blocking::Client internally,
-    /// which creates its own runtime. Calling it directly in async context causes:
-    /// "Cannot drop a runtime in a context where blocking is not allowed"
     async fn get_session(&self) -> Result<NodeSession, String> {
         // Check if we have a valid session
         if let Some(session) = self.session_holder.get_valid() {
@@ -200,29 +198,44 @@ impl NodeSessionRunner {
         }
 
         // Need to refresh - use spawn_blocking to avoid runtime panic
-        info!(op = "node_runner.refresh_session.start", "Refreshing node session");
+        info!(
+            op = "node_runner.refresh_session.start",
+            method = "node_secret",
+            "Refreshing node session via node_secret auth"
+        );
 
-        let home_path = self.home_path.clone();
-        let node_id = self.node_id;
         let engine_url = self.engine_url.clone();
-        let device_fingerprint = self.device_fingerprint.clone();
 
-        let session = tokio::task::spawn_blocking(move || {
-            refresh_node_session(
-                &home_path,
-                &node_id,
-                &engine_url,
-                device_fingerprint.as_deref(),
-            )
+        let auth_token = tokio::task::spawn_blocking(move || {
+            authenticate_node(&engine_url)
         })
         .await
         .map_err(|e| format!("Session refresh task failed: {}", e))?
         .map_err(|e| {
-            error!(op = "node_runner.refresh_session.failed", error = %e, "Session refresh failed");
+            error!(
+                op = "node_runner.refresh_session.failed",
+                method = "node_secret",
+                error = %e,
+                "Session refresh via node_secret failed"
+            );
             format!("Session refresh failed: {}", e)
         })?;
 
-        info!(op = "node_runner.refresh_session.ok", session_id = %session.session_id, "Session refreshed successfully");
+        // Convert NodeAuthToken to NodeSession
+        let session = NodeSession {
+            token: auth_token.token,
+            session_id: auth_token.session_id,
+            tenant_id: auth_token.tenant_id,
+            workspace_id: auth_token.workspace_id,
+            expires_at: auth_token.expires_at,
+        };
+
+        info!(
+            op = "node_runner.refresh_session.ok",
+            method = "node_secret",
+            session_id = %session.session_id,
+            "Session refreshed successfully via node_secret"
+        );
         self.session_holder.set(session.clone());
         Ok(session)
     }
@@ -526,9 +539,7 @@ impl NodeSessionRunner {
             engine_url: self.engine_url.clone(),
             runner_id: self.runner_id.clone(),
             session_holder: self.session_holder.clone(),
-            home_path: self.home_path.clone(),
             node_id: self.node_id,
-            device_fingerprint: self.device_fingerprint.clone(),
         };
 
         let heartbeat_fn: Arc<
@@ -643,9 +654,7 @@ struct NodeSessionRunnerHeartbeat {
     engine_url: String,
     runner_id: String,
     session_holder: Arc<NodeSessionHolder>,
-    home_path: PathBuf,
-    node_id: Uuid,
-    device_fingerprint: Option<String>,
+    node_id: Uuid, // Kept for headers only
 }
 
 impl NodeSessionRunnerHeartbeat {
@@ -654,31 +663,45 @@ impl NodeSessionRunnerHeartbeat {
         let session = if let Some(s) = self.session_holder.get_valid() {
             s
         } else {
-            // Try to refresh - use spawn_blocking to avoid Tokio runtime panic
-            // The refresh_node_session function uses reqwest::blocking::Client internally
-            info!(op = "node_runner.heartbeat.refresh_session.start", "Refreshing session for heartbeat");
+            // Try to refresh using node_secret auth (NOT Ed25519)
+            info!(
+                op = "node_runner.heartbeat.refresh_session.start",
+                method = "node_secret",
+                "Refreshing session for heartbeat via node_secret"
+            );
 
-            let home_path = self.home_path.clone();
-            let node_id = self.node_id;
             let engine_url = self.engine_url.clone();
-            let device_fingerprint = self.device_fingerprint.clone();
 
-            let session = tokio::task::spawn_blocking(move || {
-                refresh_node_session(
-                    &home_path,
-                    &node_id,
-                    &engine_url,
-                    device_fingerprint.as_deref(),
-                )
+            let auth_token = tokio::task::spawn_blocking(move || {
+                authenticate_node(&engine_url)
             })
             .await
             .map_err(|e| format!("Session refresh task failed: {}", e))?
             .map_err(|e| {
-                error!(op = "node_runner.heartbeat.refresh_session.failed", error = %e, "Session refresh for heartbeat failed");
+                error!(
+                    op = "node_runner.heartbeat.refresh_session.failed",
+                    method = "node_secret",
+                    error = %e,
+                    "Session refresh for heartbeat failed"
+                );
                 format!("Session refresh failed: {}", e)
             })?;
 
-            info!(op = "node_runner.heartbeat.refresh_session.ok", session_id = %session.session_id, "Session refreshed for heartbeat");
+            // Convert NodeAuthToken to NodeSession
+            let session = NodeSession {
+                token: auth_token.token,
+                session_id: auth_token.session_id,
+                tenant_id: auth_token.tenant_id,
+                workspace_id: auth_token.workspace_id,
+                expires_at: auth_token.expires_at,
+            };
+
+            info!(
+                op = "node_runner.heartbeat.refresh_session.ok",
+                method = "node_secret",
+                session_id = %session.session_id,
+                "Session refreshed for heartbeat via node_secret"
+            );
             self.session_holder.set(session.clone());
             session
         };
@@ -742,10 +765,15 @@ impl NodeSessionRunnerHeartbeat {
 // Public API
 // =============================================================================
 
+/// Max consecutive errors before entering backoff mode
+const MAX_CONSECUTIVE_ERRORS: u32 = 3;
+/// Max backoff delay in seconds
+const MAX_BACKOFF_SECS: u64 = 60;
+
 /// Start the node session runner loop
 ///
-/// This is the replacement for the internal-key based runner.
-/// Requires a valid node session to be established first.
+/// Uses node_id + node_secret auth for session refresh (NOT Ed25519).
+/// Includes backoff on repeated failures to prevent poll spam.
 pub async fn run_node_session_runner_loop(
     config: NodeSessionRunnerConfig,
     session_holder: Arc<NodeSessionHolder>,
@@ -764,8 +792,11 @@ pub async fn run_node_session_runner_loop(
         op = "node_runner.start",
         runner_id = %runner.runner_id,
         node_id = %runner.node_id,
-        "Node session runner starting"
+        auth_method = "node_secret",
+        "Node session runner starting (uses node_secret auth)"
     );
+
+    let mut consecutive_errors: u32 = 0;
 
     loop {
         // Check for shutdown signal
@@ -777,6 +808,8 @@ pub async fn run_node_session_runner_loop(
 
         match runner.poll_tasks().await {
             Ok(tasks) => {
+                // Reset error count on success
+                consecutive_errors = 0;
                 cb.on_poll();
 
                 if tasks.is_empty() {
@@ -811,9 +844,29 @@ pub async fn run_node_session_runner_loop(
                 }
             }
             Err(e) => {
-                error!(op = "node_runner.poll.error", error = %e, "Poll failed");
+                consecutive_errors += 1;
+
+                // Calculate backoff: exponential up to MAX_BACKOFF_SECS
+                let backoff_secs = if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    std::cmp::min(
+                        POLL_INTERVAL_SECS * (1 << (consecutive_errors - MAX_CONSECUTIVE_ERRORS)),
+                        MAX_BACKOFF_SECS,
+                    )
+                } else {
+                    POLL_INTERVAL_SECS
+                };
+
+                error!(
+                    op = "node_runner.poll.error",
+                    error = %e,
+                    consecutive_errors = consecutive_errors,
+                    backoff_secs = backoff_secs,
+                    "Poll failed"
+                );
                 cb.on_error(&e);
-                tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
+
+                // Wait with backoff
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
             }
         }
 

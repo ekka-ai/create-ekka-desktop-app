@@ -1,265 +1,421 @@
-//! EKKA Desktop - Entry Point
+//! EKKA Desktop - CDA Stub Entry Point
 //!
-//! Minimal main.rs that sets up Tauri with the engine commands.
-//! Starts embedded runner loop on app startup.
+//! Standalone demo implementation for CDA-generated apps.
+//! Returns demo responses for all operations (no SDK dependencies).
+//! Reads branding/app.json to configure app name and home path.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod bootstrap;
-mod commands;
-mod config;
-mod device_secret;
-mod engine_process;
-mod grants;
-mod well_known;
-mod handlers;
-mod node_auth;
-mod node_credentials;
-mod node_runner;
-mod node_vault_crypto;
-mod node_vault_store;
-mod ops;
-mod security_epoch;
-mod state;
-mod types;
-
-use commands::{engine_connect, engine_disconnect, engine_request};
-use engine_process::EngineProcess;
-use state::EngineState;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::Arc;
-use tauri::Manager;
+use std::sync::Mutex;
+use tauri::State;
 
-fn main() {
-    // Load .env.local for development (before anything else)
-    // This provides optional dev-time overrides (EKKA_SECURITY_EPOCH, etc).
-    // Note: EKKA_SECURITY_EPOCH is optional - epoch is resolved from marker file by default.
-    // Note: ENGINE_GRANT_VERIFY_KEY_B64 is now fetched from /.well-known/ekka-configuration
-    if let Err(_) = dotenvy::from_filename(".env.local") {
-        // Also try parent directory (when running from src-tauri)
-        let _ = dotenvy::from_filename("../.env.local");
+// =============================================================================
+// Types
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineRequest {
+    pub op: String,
+    #[serde(default)]
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorInfo {
+    pub code: String,
+    pub message: String,
+}
+
+impl EngineResponse {
+    pub fn ok(result: Value) -> Self {
+        Self { ok: true, result: Some(result), error: None }
     }
 
-    // Initialize tracing for runner logs
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("ekka_runner_core=info".parse().unwrap())
-                .add_directive("ekka_runner_local=info".parse().unwrap())
-                .add_directive("ekka_desktop_app=info".parse().unwrap())
-                .add_directive("ekka_node_auth=info".parse().unwrap()),
-        )
-        .with_target(true)
-        .init();
+    pub fn err(code: &str, message: &str) -> Self {
+        Self {
+            ok: false,
+            result: None,
+            error: Some(ErrorInfo {
+                code: code.to_string(),
+                message: message.to_string(),
+            }),
+        }
+    }
+}
 
-    // Create engine process holder
-    let engine_process = Arc::new(EngineProcess::new());
-    let engine_for_state = engine_process.clone();
-    let engine_for_setup = engine_process.clone();
-    let engine_for_shutdown = engine_process;
+// =============================================================================
+// Branding
+// =============================================================================
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .manage(EngineState::with_engine(engine_for_state))
-        .setup(move |app| {
-            // Attempt to spawn engine process
-            tracing::info!(op = "desktop.startup", "EKKA Desktop starting");
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Branding {
+    name: String,
+    #[serde(rename = "bundleId")]
+    bundle_id: String,
+    version: String,
+}
 
-            // Log build-time baked engine URL presence (not the URL itself)
-            let engine_url_baked = option_env!("EKKA_ENGINE_URL").is_some();
-            tracing::info!(
-                op = "desktop.engine_url.baked",
-                present = engine_url_baked,
-                "EKKA_ENGINE_URL baked at build time"
+impl Default for Branding {
+    fn default() -> Self {
+        Self {
+            name: "EKKA Desktop".to_string(),
+            bundle_id: "ai.ekka.desktop".to_string(),
+            version: "0.1.0".to_string(),
+        }
+    }
+}
+
+/// Convert app name to folder slug (lowercase, spaces to hyphens)
+fn app_name_to_slug(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Compute home path based on app name
+/// Default: ~/.{slug} (dot-home) for all platforms
+/// Override: Set EKKA_DATA_HOME env var for custom location
+fn compute_home_path(app_name: &str) -> PathBuf {
+    let slug = app_name_to_slug(app_name);
+
+    // Check for env override first
+    if let Ok(env_path) = std::env::var("EKKA_DATA_HOME") {
+        if !env_path.is_empty() {
+            return PathBuf::from(env_path);
+        }
+    }
+
+    // Default: dot-home (~/.{slug}) for all platforms
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(format!(".{}", slug))
+}
+
+/// Load branding from app.json
+fn load_branding() -> Branding {
+    // Try to find branding/app.json relative to executable or current dir
+    let paths_to_try = [
+        // Relative to current directory (dev mode)
+        PathBuf::from("branding/app.json"),
+        PathBuf::from("../branding/app.json"),
+        // Relative to executable (production bundle)
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.join("../Resources/branding/app.json")))
+            .unwrap_or_default(),
+    ];
+
+    for path in &paths_to_try {
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                if let Ok(branding) = serde_json::from_str::<Branding>(&content) {
+                    return branding;
+                }
+            }
+        }
+    }
+
+    // Fallback to default
+    Branding::default()
+}
+
+// =============================================================================
+// State
+// =============================================================================
+
+pub struct EngineState {
+    connected: Mutex<bool>,
+    auth: Mutex<Option<AuthContext>>,
+    home_granted: Mutex<bool>,
+    branding: Branding,
+    home_path: PathBuf,
+}
+
+impl Default for EngineState {
+    fn default() -> Self {
+        let branding = load_branding();
+        let home_path = compute_home_path(&branding.name);
+        Self {
+            connected: Mutex::new(false),
+            auth: Mutex::new(None),
+            home_granted: Mutex::new(false),
+            branding,
+            home_path,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AuthContext {
+    tenant_id: String,
+    sub: String,
+    #[allow(dead_code)]
+    jwt: String,
+}
+
+// =============================================================================
+// Commands
+// =============================================================================
+
+#[tauri::command]
+fn engine_connect(state: State<EngineState>) -> Result<(), String> {
+    let mut connected = state.connected.lock().map_err(|e| e.to_string())?;
+    *connected = true;
+    Ok(())
+}
+
+#[tauri::command]
+fn engine_disconnect(state: State<EngineState>) {
+    if let Ok(mut connected) = state.connected.lock() {
+        *connected = false;
+    }
+    if let Ok(mut auth) = state.auth.lock() {
+        *auth = None;
+    }
+    if let Ok(mut home) = state.home_granted.lock() {
+        *home = false;
+    }
+}
+
+#[tauri::command]
+fn engine_request(req: EngineRequest, state: State<EngineState>) -> EngineResponse {
+    let home_path_str = state.home_path.display().to_string();
+
+    // Check connected (except for status operations)
+    if !matches!(req.op.as_str(), "runtime.info" | "home.status") {
+        let connected = match state.connected.lock() {
+            Ok(guard) => *guard,
+            Err(e) => return EngineResponse::err("INTERNAL_ERROR", &e.to_string()),
+        };
+
+        if !connected {
+            return EngineResponse::err(
+                "NOT_CONNECTED",
+                "Engine not connected. Call engine_connect first.",
             );
+        }
+    }
 
-            // Check for stored node credentials (vault-backed)
-            let has_creds = node_credentials::has_credentials();
+    // Dispatch
+    match req.op.as_str() {
+        // Runtime
+        "runtime.info" => {
+            let home_state = get_home_state(&state);
+            EngineResponse::ok(json!({
+                "runtime": "cda-stub",
+                "engine_present": false,
+                "mode": "demo",
+                "homeState": home_state,
+                "homePath": home_path_str,
+                "appName": state.branding.name,
+                "appVersion": state.branding.version
+            }))
+        }
 
-            if !has_creds {
-                tracing::warn!(
-                    op = "desktop.node.credentials.missing",
-                    "Node credentials not configured - onboarding required, engine start blocked"
-                );
-                // Engine will not be spawned - available will remain false
-                // UI should show onboarding flow
+        // Auth
+        "auth.set" => {
+            let tenant_id = req.payload.get("tenantId").and_then(|v| v.as_str());
+            let sub = req.payload.get("sub").and_then(|v| v.as_str());
+            let jwt = req.payload.get("jwt").and_then(|v| v.as_str());
+
+            match (tenant_id, sub, jwt) {
+                (Some(t), Some(s), Some(j)) => {
+                    if let Ok(mut auth) = state.auth.lock() {
+                        *auth = Some(AuthContext {
+                            tenant_id: t.to_string(),
+                            sub: s.to_string(),
+                            jwt: j.to_string(),
+                        });
+                    }
+                    EngineResponse::ok(json!({ "ok": true }))
+                }
+                _ => EngineResponse::err("INVALID_PAYLOAD", "Missing tenantId, sub, or jwt"),
+            }
+        }
+
+        // Home
+        "home.status" => {
+            let home_state = get_home_state(&state);
+            let home_granted = state.home_granted.lock().map(|g| *g).unwrap_or(false);
+            EngineResponse::ok(json!({
+                "state": home_state,
+                "homePath": home_path_str,
+                "grantPresent": home_granted,
+                "reason": if home_granted { Value::Null } else { json!("Demo mode - click Continue to proceed") }
+            }))
+        }
+
+        "home.grant" => {
+            let has_auth = state.auth.lock().map(|g| g.is_some()).unwrap_or(false);
+            if !has_auth {
+                return EngineResponse::err("NOT_AUTHENTICATED", "Must call auth.set before home.grant");
             }
 
-            // Resolve resource path for bootstrap binary
-            let resource_path: Option<PathBuf> = app
-                .path()
-                .resource_dir()
-                .ok()
-                .map(|dir: PathBuf| dir.join("resources").join("ekka-engine-bootstrap"));
+            if let Ok(mut home) = state.home_granted.lock() {
+                *home = true;
+            }
 
-            // Get node auth token holder and auth state to pass to spawn thread
-            let state_handle = app.state::<EngineState>();
-            let node_auth_holder = state_handle.node_auth_token.clone();
-            let node_auth_state = state_handle.node_auth_state.clone();
+            let now = chrono::Utc::now();
+            let expires = now + chrono::Duration::days(365);
 
-            // Fetch grant verification key from engine's well-known endpoint
-            // This runs async and caches the key in state for grant verification
-            let app_handle = app.app_handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let state = app_handle.state::<EngineState>();
-                match well_known::fetch_and_cache_verify_key(&state).await {
-                    Ok(()) => {
-                        tracing::info!(
-                            op = "desktop.well_known.loaded",
-                            "Grant verification key loaded from engine"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            op = "desktop.well_known.failed",
-                            error = %e,
-                            "Failed to fetch grant verification key - grants will not be verified"
-                        );
-                    }
+            EngineResponse::ok(json!({
+                "success": true,
+                "grant_id": format!("demo-grant-{}", now.timestamp_millis()),
+                "expires_at": expires.to_rfc3339()
+            }))
+        }
+
+        // Node Session (stub - return demo status)
+        "nodeSession.ensureIdentity" => {
+            let node_id = uuid::Uuid::new_v4();
+            EngineResponse::ok(json!({
+                "ok": true,
+                "node_id": node_id.to_string(),
+                "public_key_b64": "DEMO_PUBLIC_KEY",
+                "private_key_vault_ref": "vault://node/identity.key",
+                "created_at": chrono::Utc::now().to_rfc3339()
+            }))
+        }
+
+        "nodeSession.bootstrap" => {
+            EngineResponse::ok(json!({
+                "ok": true,
+                "node_id": uuid::Uuid::new_v4().to_string(),
+                "public_key_b64": "DEMO_PUBLIC_KEY",
+                "registered": true,
+                "session": {
+                    "session_id": uuid::Uuid::new_v4().to_string(),
+                    "tenant_id": "demo-tenant",
+                    "workspace_id": "demo-workspace",
+                    "expires_at": (chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339()
                 }
-            });
+            }))
+        }
 
-            // Spawn engine in background thread to not block UI
-            let engine = engine_for_setup.clone();
-            std::thread::spawn(move || {
-                // Gate: Skip engine spawn if no credentials
-                if !has_creds {
-                    tracing::info!(
-                        op = "desktop.engine.start.blocked",
-                        reason = "missing_credentials",
-                        "Engine start blocked - node credentials required"
-                    );
-                    return;
-                }
+        "nodeSession.status" => {
+            EngineResponse::ok(json!({
+                "hasIdentity": false,
+                "hasSession": false,
+                "sessionValid": false,
+                "identity": Value::Null,
+                "session": Value::Null
+            }))
+        }
 
-                // Authenticate node with server before spawning engine
-                // EKKA_ENGINE_URL is baked at build time via build.rs
-                let engine_url = match option_env!("EKKA_ENGINE_URL") {
-                    Some(url) => url.to_string(),
-                    None => {
-                        tracing::warn!(
-                            op = "desktop.engine.start.blocked",
-                            reason = "missing_engine_url",
-                            "Engine start blocked - EKKA_ENGINE_URL not baked at build time"
-                        );
-                        return;
-                    }
-                };
+        // Runner (stub)
+        "runner.status" => {
+            EngineResponse::ok(json!({
+                "state": "stopped",
+                "active_task_id": Value::Null,
+                "last_error": Value::Null
+            }))
+        }
 
-                // Single-flight: try to acquire auth lock
-                if !node_auth_state.try_start() {
-                    tracing::info!(
-                        op = "desktop.node.auth.skipped",
-                        reason = "already_in_progress_or_completed",
-                        "Skipping auth - already attempted"
-                    );
-                    return;
-                }
+        // Paths (stub - return empty/demo)
+        "paths.check" => EngineResponse::ok(json!({ "allowed": false, "reason": "Demo mode" })),
+        "paths.list" => EngineResponse::ok(json!({ "paths": [] })),
+        "paths.get" => EngineResponse::err("NOT_FOUND", "No grants in demo mode"),
+        "paths.request" => EngineResponse::err("NOT_IMPLEMENTED", "Path grants not available in demo mode"),
+        "paths.remove" => EngineResponse::err("NOT_IMPLEMENTED", "Path grants not available in demo mode"),
 
-                tracing::info!(
-                    op = "desktop.node.auth.attempt",
-                    reason = "startup",
-                    "Authenticating node from vault"
-                );
+        // Vault (stub - return demo status)
+        "vault.status" => EngineResponse::ok(json!({ "available": false, "reason": "Demo mode" })),
+        "vault.capabilities" => EngineResponse::ok(json!({ "secrets": false, "bundles": false, "files": false })),
 
-                match node_credentials::authenticate_node(&engine_url) {
-                    Ok(token) => {
-                        // Store token in state (in-memory only)
-                        node_auth_holder.set(token);
-                        node_auth_state.set_authenticated();
-                        tracing::info!(
-                            op = "desktop.node.auth.complete",
-                            "Node authenticated, proceeding to engine spawn"
-                        );
-                    }
-                    Err(node_credentials::CredentialsError::AuthFailed(status, ref body)) => {
-                        let error_msg = format!("Auth failed: HTTP {}", status);
-                        node_auth_state.set_failed(error_msg);
+        // Vault secrets (stub)
+        "vault.secrets.list" => EngineResponse::ok(json!({ "secrets": [] })),
+        "vault.secrets.get" => EngineResponse::err("NOT_FOUND", "No secrets in demo mode"),
+        "vault.secrets.create" | "vault.secrets.update" | "vault.secrets.delete" | "vault.secrets.upsert" => {
+            EngineResponse::err("NOT_IMPLEMENTED", "Vault not available in demo mode")
+        }
 
-                        // Check if this is a secret error (invalid or revoked)
-                        if node_credentials::is_secret_error(status, body) {
-                            tracing::warn!(
-                                op = "desktop.node.auth.failed",
-                                status = status,
-                                "Node secret is invalid or revoked - clearing credentials"
-                            );
-                            // Clear invalid credentials from keychain
-                            let _ = node_credentials::clear_credentials();
-                        } else {
-                            tracing::warn!(
-                                op = "desktop.node.auth.failed",
-                                status = status,
-                                "Node authentication failed - will not retry"
-                            );
-                        }
-                        return;
-                    }
-                    Err(e) => {
-                        let error_msg = format!("Auth failed: {}", e);
-                        node_auth_state.set_failed(error_msg);
-                        tracing::warn!(
-                            op = "desktop.node.auth.failed",
-                            error = %e,
-                            "Node authentication failed - will not retry"
-                        );
-                        return;
-                    }
-                }
+        // Vault bundles (stub)
+        "vault.bundles.list" => EngineResponse::ok(json!({ "bundles": [] })),
+        "vault.bundles.get" => EngineResponse::err("NOT_FOUND", "No bundles in demo mode"),
+        "vault.bundles.create" | "vault.bundles.rename" | "vault.bundles.delete" => {
+            EngineResponse::err("NOT_IMPLEMENTED", "Vault not available in demo mode")
+        }
+        "vault.bundles.listSecrets" => EngineResponse::ok(json!({ "secrets": [] })),
+        "vault.bundles.addSecret" | "vault.bundles.removeSecret" => {
+            EngineResponse::err("NOT_IMPLEMENTED", "Vault not available in demo mode")
+        }
 
-                // Install bootstrap binary from resources if not present
-                if let Err(e) = engine_process::ensure_bootstrap_installed_from_resources(resource_path) {
-                    tracing::debug!(op = "engine.bootstrap.skip", error = %e, "Bootstrap install skipped");
-                }
+        // Vault files (stub)
+        "vault.files.list" => EngineResponse::ok(json!({ "entries": [] })),
+        "vault.files.exists" => EngineResponse::ok(json!({ "exists": false })),
+        "vault.files.writeText" | "vault.files.writeBytes" | "vault.files.readText" | "vault.files.readBytes" |
+        "vault.files.delete" | "vault.files.mkdir" | "vault.files.move" => {
+            EngineResponse::err("NOT_IMPLEMENTED", "Vault files not available in demo mode")
+        }
 
-                // Log setup complete
-                tracing::info!(
-                    op = "desktop.setup.complete",
-                    "Device setup complete - credentials valid, proceeding to engine"
-                );
+        // Vault audit (stub)
+        "vault.audit.list" => EngineResponse::ok(json!({ "events": [], "total": 0 })),
 
-                engine_process::spawn_and_wait(&engine);
-                let status = engine.get_status();
-                tracing::info!(
-                    op = "desktop.engine_status",
-                    installed = status.installed,
-                    running = status.running,
-                    available = status.available,
-                    pid = ?status.pid,
-                    version = ?status.version,
-                    build = ?status.build,
-                    "Engine status"
-                );
+        // Vault injection (stub)
+        "vault.attachSecretsToConnector" | "vault.injectSecretsIntoRun" => {
+            EngineResponse::err("NOT_IMPLEMENTED", "Vault injection not available in demo mode")
+        }
 
-                if status.available {
-                    tracing::info!(
-                        op = "desktop.engine.ready",
-                        "Engine is ready"
-                    );
-                }
-            });
+        // Debug
+        "debug.isDevMode" => EngineResponse::ok(json!({ "isDevMode": true })),
+        "debug.openFolder" => EngineResponse::err("NOT_IMPLEMENTED", "Not available in demo mode"),
+        "debug.resolveVaultPath" => EngineResponse::err("NOT_IMPLEMENTED", "Not available in demo mode"),
 
-            // Node runner is started via nodeSession.bootstrap operation.
-            // Node auth happens at app startup (above) using node_id + node_secret.
-            // This ensures:
-            // 1. Node credentials loaded from vault (encrypted at rest)
-            // 2. Node authenticated via POST /engine/nodes/auth
-            // 3. Node JWT (role=node) stored in memory
-            // 4. Runner uses node JWT (NOT user JWT or internal service key)
+        // DB/Queue/Pipeline (not implemented)
+        "db.get" | "db.put" | "db.delete" |
+        "queue.enqueue" | "queue.claim" | "queue.ack" | "queue.nack" | "queue.heartbeat" |
+        "pipeline.submit" | "pipeline.events" => {
+            EngineResponse::err("NOT_IMPLEMENTED", &format!("{} not available in demo mode", req.op))
+        }
 
-            Ok(())
-        })
+        // Unknown
+        _ => EngineResponse::err("INVALID_OP", &format!("Unknown operation: {}", req.op)),
+    }
+}
+
+fn get_home_state(state: &EngineState) -> &'static str {
+    let home_granted = state.home_granted.lock().map(|g| *g).unwrap_or(false);
+    let has_auth = state.auth.lock().map(|g| g.is_some()).unwrap_or(false);
+
+    if home_granted {
+        "HOME_GRANTED"
+    } else if has_auth {
+        "AUTHENTICATED_NO_HOME_GRANT"
+    } else {
+        "BOOTSTRAP_PRE_LOGIN"
+    }
+}
+
+// =============================================================================
+// Main
+// =============================================================================
+
+fn main() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .manage(EngineState::default())
         .invoke_handler(tauri::generate_handler![
             engine_connect,
             engine_disconnect,
             engine_request,
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(move |_app, event| {
-            if let tauri::RunEvent::Exit = event {
-                // Shutdown engine process on app exit
-                tracing::debug!(op = "desktop.shutdown", "Shutting down engine process");
-                engine_process::shutdown(&engine_for_shutdown);
-            }
-        });
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
 }
