@@ -38,6 +38,43 @@ pub fn engine_connect(state: State<EngineState>) -> Result<(), String> {
     }
 
     *connected = true;
+
+    // Ensure grant verification key is loaded (Phase 6 equivalent).
+    // On normal startup this is a no-op (key already fetched by main.rs Phase 6).
+    // After first-time onboarding, Phase 6 was skipped so we fetch it here.
+    if state.get_grant_verify_key().is_none() {
+        let response = state.core_process.request(
+            "wellKnown.fetch",
+            &serde_json::json!({}),
+        );
+        if response.ok {
+            if let Some(ref result) = response.result {
+                if let Some(key) = result
+                    .get("grant_verify_key_b64")
+                    .and_then(|v| v.as_str())
+                {
+                    state.set_grant_verify_key(key.to_string());
+                    std::env::set_var("ENGINE_GRANT_VERIFY_KEY_B64", key);
+                    tracing::info!(
+                        op = "desktop.well_known.loaded",
+                        source = "engine_connect",
+                        "Grant verification key loaded post-onboarding"
+                    );
+                }
+            }
+        } else {
+            let err_msg = response.error.as_ref()
+                .map(|e| e.message.as_str())
+                .unwrap_or("Unknown error");
+            tracing::warn!(
+                op = "desktop.well_known.failed",
+                source = "engine_connect",
+                error = %err_msg,
+                "Failed to fetch grant verification key"
+            );
+        }
+    }
+
     Ok(())
 }
 

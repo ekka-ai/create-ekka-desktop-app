@@ -9,13 +9,13 @@
 //!    a. Run node-gated updater → FATAL if fails
 //!    b. Authenticate node → FATAL if fails
 //!    c. Spawn engine → FATAL if fails
-//! 5. After onboarding stores credentials → app.restart()
+//! 5. After onboarding stores credentials → TS calls engine_connect → login
 //!
 //! # Design Constraints
 //!
 //! - Node ID is REQUIRED before updater/engine/runner
 //! - Fresh install loads UI for onboarding only
-//! - After onboarding → full restart → normal startup
+//! - After onboarding → engine_connect loads key via wellKnown.fetch → login
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -104,7 +104,7 @@ fn main() {
                     op = "desktop.onboarding.mode",
                     "Onboarding mode - UI will load, engine/updater/runner blocked"
                 );
-                // UI loads, user completes onboarding, nodeCredentials.set triggers restart
+                // UI loads, user completes onboarding, TS calls engine_connect (loads key)
                 return Ok(());
             }
 
