@@ -88,7 +88,7 @@ pub fn engine_request(req: EngineRequest, state: State<EngineState>, app_handle:
         "auth.set" => auth::handle_set(&req.payload, &state),
 
         // Node Credentials (routed to Desktop Core process via JSON-RPC)
-        // After successful set, app restarts to run full startup with credentials
+        // After successful set, TS calls engine_connect and proceeds to login
         "nodeCredentials.set" => handle_node_credentials_set_via_core(&req.payload, &state, app_handle),
         "nodeCredentials.status" => state.core_process.request("nodeCredentials.status", &req.payload),
         "nodeCredentials.clear" => state.core_process.request("nodeCredentials.clear", &req.payload),
@@ -307,11 +307,11 @@ fn handle_setup_status(state: &EngineState) -> EngineResponse {
 // Node Credentials Handlers
 // =============================================================================
 
-/// Set node credentials via Desktop Core process, then restart app
+/// Set node credentials via Desktop Core process
 ///
 /// Core handles validation and encrypted storage.
-/// Host handles the app restart (Bridge-specific).
-fn handle_node_credentials_set_via_core(payload: &Value, state: &EngineState, app_handle: AppHandle) -> EngineResponse {
+/// TS handles the post-onboarding transition: handleSetupComplete() → ekka.connect() → login.
+fn handle_node_credentials_set_via_core(payload: &Value, state: &EngineState, _app_handle: AppHandle) -> EngineResponse {
     tracing::info!(op = "rust.local.op", opName = "nodeCredentials.set", "Routing nodeCredentials.set to Desktop Core");
 
     let resp = state.core_process.request("nodeCredentials.set", payload);
@@ -319,11 +319,8 @@ fn handle_node_credentials_set_via_core(payload: &Value, state: &EngineState, ap
     if resp.ok {
         tracing::info!(
             op = "desktop.onboarding.complete",
-            "Credentials stored via Core - restarting app for full startup"
+            "Credentials stored via Core - TS will call engine_connect and proceed"
         );
-        // Restart app to run full startup with credentials
-        // This triggers: updater check → node auth → engine spawn
-        app_handle.restart();
     }
 
     resp
