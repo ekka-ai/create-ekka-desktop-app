@@ -1,0 +1,39 @@
+[package]
+name = "ekka-node-module-actions"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "EKKA Node Actions Module - Session-gated authorization and execution"
+
+[dependencies]
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID for authorization IDs
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Web framework
+axum = "0.7"
+
+# HTTP types
+http = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# Module interface
+ekka-node-modules = { path = "../../framework/ekka-node-modules" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

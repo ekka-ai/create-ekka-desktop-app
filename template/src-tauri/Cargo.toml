@@ -5,9 +5,59 @@ description = "EKKA Desktop Application"
 authors = ["EKKA"]
 edition = "2021"
 
-# Prevent inheriting parent workspace
 [workspace]
-members = ["crates/ekka-desktop-core"]
+members = [
+    "crates/ekka-desktop-core",
+    "crates/vendor/core/*",
+    "crates/vendor/security/*",
+    "crates/vendor/framework/*",
+    "crates/vendor/modules/*",
+    "crates/vendor/apps/*",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["EKKA"]
+license = "LicenseRef-Proprietary"
+repository = "https://github.com/ekka-ai/ekka-execution-node-sdk-rust"
+description = "EKKA Execution Node SDK"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+anyhow = "1.0"
+zeroize = { version = "1.7", features = ["derive"] }
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+hmac = "0.12"
+rand = "0.8"
+keyring = "3.6"
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher"] }
+dirs = "5.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+hostname = "0.4"
+
+[workspace.lints.rust]
+warnings = "deny"
+unused = "deny"
+dead_code = "deny"
+unused_variables = "deny"
+unused_imports = "deny"
+unused_mut = "deny"
+
+[workspace.lints.clippy]
+all = "deny"
+pedantic = "warn"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -20,9 +70,9 @@ tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
-ekka-sdk-core = { path = "../../ekka-execution-node-sdk-rust/crates/framework/ekka-sdk-core" }
-ekka-runner-core = { path = "../../ekka-execution-node-sdk-rust/crates/framework/ekka-runner-core" }
-ekka-runner-local = { path = "../../ekka-execution-node-sdk-rust/crates/apps/ekka-runner-local" }
+ekka-sdk-core = { path = "./crates/vendor/framework/ekka-sdk-core" }
+ekka-runner-core = { path = "./crates/vendor/framework/ekka-runner-core" }
+ekka-runner-local = { path = "./crates/vendor/apps/ekka-runner-local" }
 reqwest = { version = "0.11", features = ["blocking", "json"] }
 http = "1"
 uuid = { version = "1.0", features = ["v4"] }

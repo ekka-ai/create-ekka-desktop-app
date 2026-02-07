@@ -1,0 +1,33 @@
+[package]
+name = "ekka-node-module-github"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "EKKA Node GitHub Module - OAuth and PR creation with server-side token storage"
+
+[dependencies]
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Web framework
+axum = "0.7"
+
+# Logging
+tracing = "0.1"
+
+# URL encoding for OAuth
+urlencoding = "2.1"
+
+# Module interface
+ekka-node-modules = { path = "../../framework/ekka-node-modules" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

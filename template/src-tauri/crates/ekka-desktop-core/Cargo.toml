@@ -21,7 +21,7 @@ hex = "0.4"
 anyhow = "1.0"
 
 # SDK dependencies (only the primitives we need)
-ekka-sdk-core = { path = "../../../../ekka-execution-node-sdk-rust/crates/framework/ekka-sdk-core" }
+ekka-sdk-core = { path = "../vendor/framework/ekka-sdk-core" }
 
 [dev-dependencies]
 tempfile = "3"

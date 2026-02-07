@@ -1,0 +1,43 @@
+[package]
+name = "ekka-node-module-jobs"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "EKKA Node Jobs Module - Capability-gated job execution skeleton with persistence (RAPTOR-2 Step 32 + RAPTOR-3 Step 1)"
+
+[dependencies]
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID for job/workspace IDs
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Web framework
+axum = "0.7"
+
+# Logging
+tracing = "0.1"
+
+# Module interface
+ekka-node-modules = { path = "../../framework/ekka-node-modules" }
+
+# Encryption (RAPTOR-3 Step 1)
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "ekka-vault"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ekka-crypto = { path = "../../core/ekka-crypto" }
+ekka-path-guard = { path = "../ekka-path-guard" }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+
+[dev-dependencies]
+tempfile = "3.12"
+
+[lints]
+workspace = true

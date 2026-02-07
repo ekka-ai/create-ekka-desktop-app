@@ -1,0 +1,56 @@
+[package]
+name = "ekka-sdk-core"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "EKKA SDK Core - Facade crate for desktop and runner apps"
+
+[dependencies]
+# Core
+ekka-crypto = { path = "../../core/ekka-crypto" }
+ekka-secure-storage = { path = "../../core/ekka-secure-storage" }
+ekka-encrypted-db = { path = "../../core/ekka-encrypted-db" }
+ekka-ops = { path = "../../core/ekka-ops" }
+
+# Security
+ekka-home-bootstrap = { path = "../../security/ekka-home-bootstrap" }
+ekka-path-guard = { path = "../../security/ekka-path-guard" }
+ekka-vault = { path = "../../security/ekka-vault" }
+
+# Framework
+ekka-node-modules = { path = "../ekka-node-modules" }
+
+# Optional modules (feature-gated)
+ekka-node-module-vault = { path = "../../modules/ekka-node-module-vault", optional = true }
+ekka-node-module-workspaces = { path = "../../modules/ekka-node-module-workspaces", optional = true }
+ekka-node-module-actions = { path = "../../modules/ekka-node-module-actions", optional = true }
+ekka-node-module-github = { path = "../../modules/ekka-node-module-github", optional = true }
+ekka-node-module-git = { path = "../../modules/ekka-node-module-git", optional = true }
+ekka-node-module-jobs = { path = "../../modules/ekka-node-module-jobs", optional = true }
+ekka-node-module-llm = { path = "../../modules/ekka-node-module-llm", optional = true }
+ekka-node-module-agent = { path = "../../modules/ekka-node-module-agent", optional = true }
+
+[features]
+default = []
+module-vault = ["dep:ekka-node-module-vault"]
+module-workspaces = ["dep:ekka-node-module-workspaces"]
+module-actions = ["dep:ekka-node-module-actions"]
+module-github = ["dep:ekka-node-module-github"]
+module-git = ["dep:ekka-node-module-git"]
+module-jobs = ["dep:ekka-node-module-jobs"]
+module-llm = ["dep:ekka-node-module-llm"]
+module-agent = ["dep:ekka-node-module-agent"]
+all-modules = [
+    "module-vault",
+    "module-workspaces",
+    "module-actions",
+    "module-github",
+    "module-git",
+    "module-jobs",
+    "module-llm",
+    "module-agent",
+]
+
+[lints]
+workspace = true

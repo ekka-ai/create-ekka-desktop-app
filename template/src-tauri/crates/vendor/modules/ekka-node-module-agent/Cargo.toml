@@ -1,0 +1,41 @@
+[package]
+name = "ekka-node-module-agent"
+version = "0.1.0"
+edition = "2021"
+description = "EKKA Node Agent Module - LLM-backed agent engine (RAPTOR-3 Step 6)"
+
+[dependencies]
+# Shared module infrastructure
+ekka-node-modules = { path = "../../framework/ekka-node-modules" }
+
+# LLM provider (RAPTOR-3 Step 6)
+ekka-node-module-llm = { path = "../ekka-node-module-llm" }
+
+# Web framework
+axum = "0.7"
+
+# Async runtime
+tokio = { version = "1.0", features = ["rt-multi-thread"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# UUID for job_id handling
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Hashing for deterministic outputs
+sha2 = "0.10"
+hex = "0.4"
+
+# Regex for intent extraction
+regex = "1.10"
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

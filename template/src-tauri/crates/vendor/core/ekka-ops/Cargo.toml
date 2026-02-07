@@ -1,0 +1,29 @@
+[package]
+name = "ekka-ops"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "EKKA Operations - SDK orchestration for home, paths, and grants"
+
+[dependencies]
+# Workspace dependencies
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+# Local SDK crates
+ekka-path-guard = { path = "../../security/ekka-path-guard" }
+ekka-home-bootstrap = { path = "../../security/ekka-home-bootstrap" }
+ekka-vault = { path = "../../security/ekka-vault" }
+ekka-crypto = { path = "../ekka-crypto" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
