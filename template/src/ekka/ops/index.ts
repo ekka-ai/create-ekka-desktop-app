@@ -13,3 +13,4 @@ export * as setup from './setup';
 export * as vault from './vault';
 export * as nodeSession from './nodeSession';
 export * as nodeCredentials from './nodeCredentials';
+export * as admin from './admin';

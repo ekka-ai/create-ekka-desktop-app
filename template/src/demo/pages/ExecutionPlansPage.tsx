@@ -1,11 +1,8 @@
 /**
  * Execution Plans Page
  *
- * Generic execution plan runner demo:
- * - Select a plan from dropdown
- * - Edit input JSON
- * - Execute (start a run)
- * - View runs grid + run details/events
+ * Plan selection, input editing, execution, and runs grid.
+ * Clicking "View" on a run navigates to ExecutionRunDetailPage (via onViewRun).
  */
 
 import { useState, useEffect, useCallback, useRef, type CSSProperties, type ReactElement } from 'react';
@@ -13,7 +10,7 @@ import { _internal, makeRequest } from '../../ekka/internal';
 import { InfoTooltip } from '../components';
 
 // =============================================================================
-// API HELPERS (use internal request wrapper, no direct fetch)
+// API TYPES
 // =============================================================================
 
 interface Plan {
@@ -29,24 +26,25 @@ interface Plan {
 interface Run {
   id: string;
   plan_id: string;
+  plan_code?: string;
   status: string;
+  progress?: number;
+  correlation_id?: string;
   inputs?: Record<string, unknown>;
+  context?: Record<string, unknown>;
   outputs?: Record<string, unknown>;
+  result?: Record<string, unknown>;
   error?: string;
+  duration_ms?: number;
   created_at: string;
   updated_at?: string;
   started_at?: string;
   completed_at?: string;
 }
 
-interface RunEvent {
-  id: string;
-  run_id: string;
-  event_type: string;
-  step_key?: string;
-  payload?: unknown;
-  created_at: string;
-}
+// =============================================================================
+// API HELPERS (use internal request wrapper, no direct fetch)
+// =============================================================================
 
 async function request<T>(op: string, payload: unknown = {}): Promise<T> {
   const req = makeRequest(op, payload);
@@ -63,25 +61,23 @@ async function listPlans(): Promise<Plan[]> {
 }
 
 async function getPlan(id: string): Promise<Plan> {
-  return request<Plan>('execution.plans.get', { id });
+  const result = await request<{ plan?: Plan }>('execution.plans.get', { id });
+  return result.plan || result as unknown as Plan;
 }
 
-async function listRuns(planId: string): Promise<Run[]> {
-  const result = await request<{ data?: Run[]; runs?: Run[] }>('execution.plans.runs.list', { planId, limit: 25 });
-  return result.data || result.runs || (Array.isArray(result) ? result as unknown as Run[] : []);
+interface RunsPage {
+  runs: Run[];
+  total: number;
+}
+
+async function listRuns(planId: string, limit: number, offset: number): Promise<RunsPage> {
+  const result = await request<{ data?: Run[]; runs?: Run[]; total?: number }>('execution.plans.runs.list', { planId, limit, offset });
+  const runs = result.data || result.runs || (Array.isArray(result) ? result as unknown as Run[] : []);
+  return { runs, total: result.total ?? runs.length };
 }
 
 async function startRun(plan_id: string, inputs: Record<string, unknown>): Promise<Run> {
   return request<Run>('execution.runs.start', { plan_id, inputs });
-}
-
-async function getRun(runId: string): Promise<Run> {
-  return request<Run>('execution.runs.get', { runId });
-}
-
-async function getRunEvents(runId: string): Promise<RunEvent[]> {
-  const result = await request<{ data?: RunEvent[]; events?: RunEvent[] }>('execution.runs.events', { runId });
-  return result.data || result.events || (Array.isArray(result) ? result as unknown as RunEvent[] : []);
 }
 
 // =============================================================================
@@ -90,17 +86,19 @@ async function getRunEvents(runId: string): Promise<RunEvent[]> {
 
 interface ExecutionPlansPageProps {
   darkMode: boolean;
+  onViewRun?: (runId: string) => void;
 }
 
-export function ExecutionPlansPage({ darkMode }: ExecutionPlansPageProps): ReactElement {
+export function ExecutionPlansPage({ darkMode, onViewRun }: ExecutionPlansPageProps): ReactElement {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [selectedPlanId, setSelectedPlanId] = useState<string>('');
   const [selectedPlan, setSelectedPlan] = useState<Plan | null>(null);
   const [inputJson, setInputJson] = useState<string>('{}');
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
-  const [selectedRun, setSelectedRun] = useState<Run | null>(null);
-  const [runEvents, setRunEvents] = useState<RunEvent[]>([]);
+  const [runsTotal, setRunsTotal] = useState(0);
+  const [runsOffset, setRunsOffset] = useState(0);
+  const runsLimit = 10;
   const [loading, setLoading] = useState(false);
   const [executing, setExecuting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -133,7 +131,6 @@ export function ExecutionPlansPage({ darkMode }: ExecutionPlansPageProps): React
     button: { padding: '8px 20px', fontSize: '13px', fontWeight: 500, borderRadius: '6px', border: 'none', cursor: 'pointer', transition: 'opacity 0.15s' },
     buttonPrimary: { background: colors.blue, color: '#ffffff' },
     buttonDisabled: { opacity: 0.5, cursor: 'not-allowed' },
-    grid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' },
     table: { width: '100%', borderCollapse: 'collapse' as const, fontSize: '12px' },
     th: { textAlign: 'left' as const, padding: '8px 10px', borderBottom: `1px solid ${colors.border}`, fontWeight: 600, color: colors.textMuted, fontSize: '11px', textTransform: 'uppercase' as const, letterSpacing: '0.04em' },
     td: { padding: '8px 10px', borderBottom: `1px solid ${colors.border}`, verticalAlign: 'top' as const },
@@ -141,9 +138,8 @@ export function ExecutionPlansPage({ darkMode }: ExecutionPlansPageProps): React
     badge: { display: 'inline-block', padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 500 },
     sectionTitle: { fontSize: '14px', fontWeight: 600, marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '6px' },
     meta: { fontSize: '12px', color: colors.textMuted, marginTop: '8px' },
-    pre: { background: darkMode ? '#1c1c1e' : '#f5f5f7', border: `1px solid ${colors.border}`, borderRadius: '6px', padding: '12px', fontSize: '11px', fontFamily: 'SF Mono, Menlo, monospace', overflow: 'auto', maxHeight: '300px', whiteSpace: 'pre-wrap' as const, wordBreak: 'break-all' as const },
+    pre: { background: darkMode ? '#1c1c1e' : '#f5f5f7', border: `1px solid ${colors.border}`, borderRadius: '6px', padding: '12px', fontSize: '11px', fontFamily: 'SF Mono, Menlo, monospace', overflow: 'auto', maxHeight: '300px', whiteSpace: 'pre-wrap' as const, wordBreak: 'break-all' as const, margin: 0 },
     link: { color: colors.blue, cursor: 'pointer', background: 'none', border: 'none', fontSize: '12px', fontFamily: 'SF Mono, Menlo, monospace', padding: 0 },
-    row: { display: 'flex', gap: '12px', alignItems: 'flex-end', marginBottom: '12px' },
   };
 
   // Load plans on mount
@@ -154,7 +150,6 @@ export function ExecutionPlansPage({ darkMode }: ExecutionPlansPageProps): React
     listPlans()
       .then((p) => {
         setPlans(p);
-        // Restore last selected plan from localStorage
         const lastPlan = localStorage.getItem('ekka_exec_plan_id');
         if (lastPlan && p.some((x) => x.id === lastPlan)) {
           setSelectedPlanId(lastPlan);
@@ -173,26 +168,28 @@ export function ExecutionPlansPage({ darkMode }: ExecutionPlansPageProps): React
     }
     localStorage.setItem('ekka_exec_plan_id', selectedPlanId);
     setSelectedPlan(null);
-    setSelectedRun(null);
-    setRunEvents([]);
+    setRunsOffset(0);
 
     getPlan(selectedPlanId)
       .then((p) => {
         setSelectedPlan(p);
-        // Prefill input JSON from schema
         const defaults = buildDefaultInputs(p);
         const lastInputs = localStorage.getItem(`ekka_exec_inputs_${selectedPlanId}`);
         setInputJson(lastInputs || JSON.stringify(defaults, null, 2));
       })
       .catch((e) => setError(e.message));
 
-    loadRuns(selectedPlanId);
+    loadRuns(selectedPlanId, 0);
   }, [selectedPlanId]);
 
-  const loadRuns = useCallback((planId: string) => {
-    listRuns(planId)
-      .then(setRuns)
-      .catch(() => setRuns([]));
+  const loadRuns = useCallback((planId: string, offset: number) => {
+    listRuns(planId, runsLimit, offset)
+      .then((page) => {
+        setRuns(page.runs);
+        setRunsTotal(page.total);
+        setRunsOffset(offset);
+      })
+      .catch(() => { setRuns([]); setRunsTotal(0); });
   }, []);
 
   // Validate JSON on change
@@ -205,7 +202,6 @@ export function ExecutionPlansPage({ darkMode }: ExecutionPlansPageProps): React
     }
   }, [inputJson]);
 
-  // Execute
   async function handleExecute() {
     if (!selectedPlanId || jsonError) return;
     setExecuting(true);
@@ -214,7 +210,7 @@ export function ExecutionPlansPage({ darkMode }: ExecutionPlansPageProps): React
       const inputs = JSON.parse(inputJson);
       localStorage.setItem(`ekka_exec_inputs_${selectedPlanId}`, inputJson);
       await startRun(selectedPlanId, inputs);
-      loadRuns(selectedPlanId);
+      loadRuns(selectedPlanId, 0);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -222,14 +218,9 @@ export function ExecutionPlansPage({ darkMode }: ExecutionPlansPageProps): React
     }
   }
 
-  // View run details
-  async function handleViewRun(runId: string) {
-    try {
-      const [run, events] = await Promise.all([getRun(runId), getRunEvents(runId)]);
-      setSelectedRun(run);
-      setRunEvents(events);
-    } catch (e) {
-      setError((e as Error).message);
+  function handleViewRun(runId: string) {
+    if (onViewRun) {
+      onViewRun(runId);
     }
   }
 
@@ -242,10 +233,11 @@ export function ExecutionPlansPage({ darkMode }: ExecutionPlansPageProps): React
   }
 
   function shortId(id: string): string {
-    return id.length > 12 ? id.slice(0, 8) + '...' : id;
+    return id && id.length > 12 ? id.slice(0, 8) + '...' : (id || '—');
   }
 
   function timeAgo(ts: string): string {
+    if (!ts) return '—';
     const diff = Date.now() - new Date(ts).getTime();
     const secs = Math.floor(diff / 1000);
     if (secs < 60) return `${secs}s ago`;
@@ -253,6 +245,13 @@ export function ExecutionPlansPage({ darkMode }: ExecutionPlansPageProps): React
     if (mins < 60) return `${mins}m ago`;
     const hrs = Math.floor(mins / 60);
     return `${hrs}h ago`;
+  }
+
+  function formatDuration(ms?: number): string {
+    if (ms == null) return '—';
+    if (ms < 1000) return `${ms}ms`;
+    if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+    return `${(ms / 60000).toFixed(1)}min`;
   }
 
   return (
@@ -310,7 +309,7 @@ export function ExecutionPlansPage({ darkMode }: ExecutionPlansPageProps): React
             </button>
             <button
               style={{ ...styles.button, border: `1px solid ${colors.border}`, background: 'transparent', color: colors.text }}
-              onClick={() => loadRuns(selectedPlanId)}
+              onClick={() => loadRuns(selectedPlanId, runsOffset)}
             >
               Refresh Runs
             </button>
@@ -321,33 +320,61 @@ export function ExecutionPlansPage({ darkMode }: ExecutionPlansPageProps): React
       {/* Runs Grid */}
       {selectedPlanId && runs.length > 0 && (
         <div style={styles.card}>
-          <div style={styles.sectionTitle}>Runs ({runs.length})</div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+            <div style={styles.sectionTitle}>Runs</div>
+            <span style={{ fontSize: '11px', color: colors.textMuted }}>
+              {runsTotal > 0
+                ? `${runsOffset + 1}\u2013${runsOffset + runs.length} of ${runsTotal}`
+                : `Showing ${runs.length}`}
+            </span>
+          </div>
           <table style={styles.table}>
             <thead>
               <tr>
                 <th style={styles.th}>Run ID</th>
                 <th style={styles.th}>Status</th>
+                <th style={styles.th}>Duration</th>
                 <th style={styles.th}>Created</th>
-                <th style={styles.th}>Actions</th>
+                <th style={styles.th}></th>
               </tr>
             </thead>
             <tbody>
               {runs.map((run) => (
-                <tr key={run.id}>
+                <tr key={run.id} style={{ cursor: 'pointer' }} onClick={() => handleViewRun(run.id)}>
                   <td style={{ ...styles.td, ...styles.mono }}>{shortId(run.id)}</td>
                   <td style={styles.td}>
                     <span style={{ ...styles.badge, background: `${statusColor(run.status)}20`, color: statusColor(run.status) }}>
                       {run.status}
                     </span>
                   </td>
+                  <td style={{ ...styles.td, ...styles.mono, color: colors.textMuted }}>{formatDuration(run.duration_ms)}</td>
                   <td style={{ ...styles.td, color: colors.textMuted }}>{timeAgo(run.created_at)}</td>
                   <td style={styles.td}>
-                    <button style={styles.link} onClick={() => handleViewRun(run.id)}>View</button>
+                    <button style={styles.link} onClick={(e) => { e.stopPropagation(); handleViewRun(run.id); }}>View</button>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          {/* Pagination controls */}
+          {(runsOffset > 0 || runsOffset + runs.length < runsTotal) && (
+            <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '8px', marginTop: '12px', paddingTop: '8px', borderTop: `1px solid ${colors.border}` }}>
+              <button
+                style={{ ...styles.button, padding: '5px 14px', fontSize: '12px', border: `1px solid ${colors.border}`, background: 'transparent', color: colors.text, ...(runsOffset === 0 ? styles.buttonDisabled : {}) }}
+                disabled={runsOffset === 0}
+                onClick={() => loadRuns(selectedPlanId, Math.max(0, runsOffset - runsLimit))}
+              >
+                {'\u2190'} Prev
+              </button>
+              <button
+                style={{ ...styles.button, padding: '5px 14px', fontSize: '12px', border: `1px solid ${colors.border}`, background: 'transparent', color: colors.text, ...(runsOffset + runs.length >= runsTotal ? styles.buttonDisabled : {}) }}
+                disabled={runsOffset + runs.length >= runsTotal}
+                onClick={() => loadRuns(selectedPlanId, runsOffset + runsLimit)}
+              >
+                Next {'\u2192'}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -357,80 +384,6 @@ export function ExecutionPlansPage({ darkMode }: ExecutionPlansPageProps): React
         </div>
       )}
 
-      {/* Run Detail Panel */}
-      {selectedRun && (
-        <div style={styles.card}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <div style={styles.sectionTitle}>
-              Run Detail
-              <span style={{ ...styles.badge, background: `${statusColor(selectedRun.status)}20`, color: statusColor(selectedRun.status) }}>
-                {selectedRun.status}
-              </span>
-            </div>
-            <button style={styles.link} onClick={() => { setSelectedRun(null); setRunEvents([]); }}>Close</button>
-          </div>
-
-          <div style={{ ...styles.grid, marginBottom: '16px' }}>
-            <div>
-              <span style={styles.label}>Run ID</span>
-              <div style={styles.mono}>{selectedRun.id}</div>
-            </div>
-            <div>
-              <span style={styles.label}>Created</span>
-              <div style={{ fontSize: '12px' }}>{new Date(selectedRun.created_at).toLocaleString()}</div>
-            </div>
-          </div>
-
-          {selectedRun.error && (
-            <div style={{ ...styles.error, marginBottom: '12px' }}>
-              <strong>Error:</strong> {selectedRun.error}
-            </div>
-          )}
-
-          {selectedRun.outputs && Object.keys(selectedRun.outputs).length > 0 && (
-            <>
-              <span style={styles.label}>Outputs</span>
-              <pre style={styles.pre}>{JSON.stringify(selectedRun.outputs, null, 2)}</pre>
-            </>
-          )}
-
-          {/* Events Timeline */}
-          <div style={{ marginTop: '16px' }}>
-            <div style={styles.sectionTitle}>
-              Events ({runEvents.length})
-              <button style={styles.link} onClick={() => handleViewRun(selectedRun.id)}>Refresh</button>
-            </div>
-            {runEvents.length === 0 ? (
-              <div style={{ color: colors.textMuted, fontSize: '12px' }}>No events yet.</div>
-            ) : (
-              <table style={styles.table}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Time</th>
-                    <th style={styles.th}>Type</th>
-                    <th style={styles.th}>Step</th>
-                    <th style={styles.th}>Detail</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {runEvents.map((ev) => (
-                    <tr key={ev.id}>
-                      <td style={{ ...styles.td, ...styles.mono, whiteSpace: 'nowrap' }}>
-                        {new Date(ev.created_at).toLocaleTimeString()}
-                      </td>
-                      <td style={{ ...styles.td, ...styles.mono }}>{ev.event_type}</td>
-                      <td style={{ ...styles.td, ...styles.mono, color: colors.textMuted }}>{ev.step_key || '—'}</td>
-                      <td style={{ ...styles.td, fontSize: '11px', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {ev.payload ? (typeof ev.payload === 'string' ? ev.payload : JSON.stringify(ev.payload).slice(0, 120)) : '—'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

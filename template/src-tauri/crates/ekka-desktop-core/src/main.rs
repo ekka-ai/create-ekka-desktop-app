@@ -100,6 +100,7 @@ impl Response {
 // =============================================================================
 
 fn dispatch(req: &Request) -> Response {
+    tracing::info!(op = %req.op, request_id = %req.id, "core.dispatch");
     match req.op.as_str() {
         "nodeCredentials.status" => handle_credentials_status(&req.id),
         "nodeCredentials.set" => handle_credentials_set(&req.id, &req.payload),
@@ -119,12 +120,13 @@ fn dispatch(req: &Request) -> Response {
         "nodeSession.ensureIdentity" => handle_ensure_node_identity(&req.id, &req.payload),
         "runtime.info" => handle_runtime_info(&req.id, &req.payload),
         "home.status" => handle_home_status(&req.id, &req.payload),
-        "execution.plans.list" => handle_execution_proxy_get(&req.id, &req.payload, "/auth/admin/execution/plans", "execution.plans.list", &["limit", "offset", "search"]),
-        "execution.plans.get" => handle_execution_proxy_get_by_id(&req.id, &req.payload, "id", "/auth/admin/execution/plans", "execution.plans.get"),
+        "execution.plans.list" => handle_execution_proxy_get(&req.id, &req.payload, "/engine/admin/execution/plans", "execution.plans.list", &["limit", "offset", "search"]),
+        "execution.plans.get" => handle_execution_proxy_get_by_id(&req.id, &req.payload, "id", "/engine/admin/execution/plans", "execution.plans.get"),
         "execution.plans.runs.list" => handle_execution_plan_runs_list(&req.id, &req.payload),
         "execution.runs.get" => handle_execution_proxy_get_by_id(&req.id, &req.payload, "runId", "/engine/admin/execution/runs", "execution.runs.get"),
         "execution.runs.events" => handle_execution_runs_events(&req.id, &req.payload),
         "execution.runs.start" => handle_execution_runs_start(&req.id, &req.payload),
+        "admin.logs" => handle_admin_logs(&req.id, &req.payload),
         "debug.isDevMode" => handle_is_dev_mode(&req.id),
         _ => Response::err(
             req.id.clone(),
@@ -272,6 +274,10 @@ fn handle_runner_status(id: &str, payload: &Value) -> Response {
 }
 
 /// node.auth.authenticate — authenticate with engine using node_secret
+///
+/// Uses shared AUTH_CACHE: returns cached token if still valid (>60s remaining),
+/// otherwise authenticates fresh. This prevents duplicate server sessions when
+/// both startup-auth and auto-auth call this handler.
 fn handle_auth_authenticate(id: &str, payload: &Value) -> Response {
     tracing::info!(op = "core.node.auth.authenticate", "Handling node.auth.authenticate");
 
@@ -281,17 +287,14 @@ fn handle_auth_authenticate(id: &str, payload: &Value) -> Response {
         .and_then(|v| v.as_str())
         .unwrap_or_else(|| config::engine_url());
 
-    match node_credentials::authenticate_node(engine_url) {
+    // Use get_cached_or_fresh_token so all auth goes through the same cache + backoff path
+    match get_cached_or_fresh_token(engine_url) {
         Ok(token) => {
-            // Populate AUTH_CACHE so runner.taskStats reuses this token
-            if let Ok(mut guard) = AUTH_CACHE.lock() {
-                *guard = Some(token.clone());
-            }
             tracing::info!(
                 op = "core.node.auth.success",
                 node_id = %token.node_id,
                 session_id = %token.session_id,
-                "Node authenticated (cached for taskStats)"
+                "Node authenticated (cached for reuse)"
             );
             Response::ok(
                 id.to_string(),
@@ -306,16 +309,10 @@ fn handle_auth_authenticate(id: &str, payload: &Value) -> Response {
                 }),
             )
         }
-        Err(node_credentials::CredentialsError::AuthFailed(status, ref body)) => {
-            let is_secret_err = node_credentials::is_secret_error(status, body);
-            let code = if is_secret_err {
-                "NODE_SECRET_INVALID"
-            } else {
-                "NODE_AUTH_FAILED"
-            };
-            Response::err(id.to_string(), code, &format!("HTTP {}: {}", status, body))
+        Err(ref e) if e.contains("session_limit") => {
+            Response::err(id.to_string(), "SESSION_LIMIT", e)
         }
-        Err(e) => Response::err(id.to_string(), "NODE_AUTH_ERROR", &e.to_string()),
+        Err(e) => Response::err(id.to_string(), "NODE_AUTH_ERROR", &e),
     }
 }
 
@@ -329,7 +326,7 @@ fn handle_auth_authenticate(id: &str, payload: &Value) -> Response {
 /// Proxies GET /engine/runner-tasks-v2/stats through Core to avoid CORS.
 /// On 401: clears cache, re-authenticates, retries once.
 fn handle_runner_task_stats(id: &str) -> Response {
-    tracing::debug!(op = "core.runner.taskStats", "Handling runner.taskStats");
+    tracing::debug!(op = "core.runner.taskStats", request_id = %id, "Handling runner.taskStats");
 
     let engine_url = config::engine_url();
 
@@ -348,6 +345,7 @@ fn handle_runner_task_stats(id: &str) -> Response {
     };
 
     let request_id = uuid::Uuid::new_v4().to_string();
+    tracing::info!(op = "core.runner.taskStats.http", correlation_id = %request_id, "Proxying to engine");
 
     let send_stats_request =
         |bearer_token: &str| -> Result<reqwest::blocking::Response, reqwest::Error> {
@@ -411,9 +409,17 @@ fn parse_stats_response(id: &str, resp: reqwest::blocking::Response) -> Response
     }
 }
 
-/// Module-level auth token cache for runner.taskStats
-/// Shared between get_cached_or_fresh_token and clear_auth_cache.
+/// Module-level auth token cache shared by all handlers.
+/// `handle_auth_authenticate`, `get_cached_or_fresh_token`, and `clear_auth_cache`
+/// all read/write through this single cache to prevent duplicate server sessions.
 static AUTH_CACHE: std::sync::Mutex<Option<node_credentials::NodeAuthToken>> =
+    std::sync::Mutex::new(None);
+
+/// Backoff deadline — when set, `get_cached_or_fresh_token` will refuse to call
+/// `authenticate_node` until `Utc::now()` passes this timestamp.
+/// Prevents the 2-second polling loop from hammering `/engine/nodes/auth` after a
+/// 429 session_limit or other transient auth failure.
+static AUTH_BACKOFF_UNTIL: std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>> =
     std::sync::Mutex::new(None);
 
 /// Clear the cached auth token (used after 401 to force re-auth)
@@ -424,9 +430,13 @@ fn clear_auth_cache() {
     }
 }
 
-/// Get a cached auth token or authenticate fresh via node_secret
+/// Get a cached auth token or authenticate fresh via node_secret.
+///
+/// Backoff protection: after a failed auth (especially 429 session_limit),
+/// further attempts are blocked for a cooldown period to prevent the 2-second
+/// `runner.taskStats` polling loop from hammering the auth endpoint.
 fn get_cached_or_fresh_token(engine_url: &str) -> Result<node_credentials::NodeAuthToken, String> {
-    // Check cache
+    // Check cache — valid token means no network call
     if let Ok(guard) = AUTH_CACHE.lock() {
         if let Some(ref cached) = *guard {
             if cached.expires_at > chrono::Utc::now() + chrono::Duration::seconds(60) {
@@ -437,21 +447,71 @@ fn get_cached_or_fresh_token(engine_url: &str) -> Result<node_credentials::NodeA
         }
     }
 
+    // Check backoff — prevent retry loop after 429 or transient failure
+    if let Ok(guard) = AUTH_BACKOFF_UNTIL.lock() {
+        if let Some(until) = *guard {
+            if chrono::Utc::now() < until {
+                let secs = (until - chrono::Utc::now()).num_seconds();
+                tracing::warn!(
+                    op = "core.auth.backoff.active",
+                    remaining_secs = secs,
+                    "Auth backoff active, skipping auth attempt"
+                );
+                return Err(format!(
+                    "Auth backoff active ({}s remaining). Previous auth failed.",
+                    secs
+                ));
+            }
+        }
+    }
+
     // Need to authenticate
     if !node_credentials::has_credentials() {
         return Err("Node not authenticated. Complete setup first.".to_string());
     }
 
-    let token = node_credentials::authenticate_node(engine_url)
-        .map_err(|e| format!("Node authentication failed: {}", e))?;
-
-    // Cache the token
-    if let Ok(mut guard) = AUTH_CACHE.lock() {
-        *guard = Some(token.clone());
+    match node_credentials::authenticate_node(engine_url) {
+        Ok(token) => {
+            // Cache the token and clear any backoff
+            if let Ok(mut guard) = AUTH_CACHE.lock() {
+                *guard = Some(token.clone());
+            }
+            if let Ok(mut guard) = AUTH_BACKOFF_UNTIL.lock() {
+                *guard = None;
+            }
+            tracing::info!(op = "core.auth.cache.stored", "Auth token cached");
+            Ok(token)
+        }
+        Err(node_credentials::CredentialsError::AuthFailed(429, ref body)) => {
+            // 429 session_limit — long backoff, do NOT retry quickly
+            let backoff_secs = 60;
+            if let Ok(mut guard) = AUTH_BACKOFF_UNTIL.lock() {
+                *guard = Some(chrono::Utc::now() + chrono::Duration::seconds(backoff_secs));
+            }
+            tracing::error!(
+                op = "core.auth.session_limit",
+                backoff_secs = backoff_secs,
+                "429 session_limit — backing off {}s",
+                backoff_secs
+            );
+            Err(format!("session_limit: {}", body))
+        }
+        Err(e) => {
+            // Other auth failure — short backoff to avoid rapid retries
+            let backoff_secs = 10;
+            if let Ok(mut guard) = AUTH_BACKOFF_UNTIL.lock() {
+                *guard = Some(chrono::Utc::now() + chrono::Duration::seconds(backoff_secs));
+            }
+            tracing::warn!(
+                op = "core.auth.failed",
+                backoff_secs = backoff_secs,
+                error = %e,
+                "Auth failed — backing off {}s",
+                backoff_secs
+            );
+            Err(format!("Node authentication failed: {}", e))
+        }
     }
-    tracing::info!(op = "core.auth.cache.stored", "Auth token cached");
-
-    Ok(token)
 }
 
 // =============================================================================
@@ -463,7 +523,8 @@ fn get_cached_or_fresh_token(engine_url: &str) -> Result<node_credentials::NodeA
 /// GET /engine/.well-known/ekka-configuration (no auth required)
 /// Returns the grant verification key for cryptographic grant validation.
 fn handle_well_known_fetch(id: &str) -> Response {
-    tracing::info!(op = "core.wellKnown.fetch", "Handling wellKnown.fetch");
+    let request_id = uuid::Uuid::new_v4().to_string();
+    tracing::info!(op = "core.wellKnown.fetch", correlation_id = %request_id, "Handling wellKnown.fetch");
 
     let engine_url = config::engine_url();
     let url = format!(
@@ -482,6 +543,8 @@ fn handle_well_known_fetch(id: &str) -> Response {
     let response = client
         .get(&url)
         .header("X-EKKA-CLIENT", config::app_slug())
+        .header("X-REQUEST-ID", &request_id)
+        .header("X-EKKA-CORRELATION-ID", &request_id)
         .send();
 
     match response {
@@ -529,7 +592,7 @@ fn handle_well_known_fetch(id: &str) -> Response {
 /// POST {engine_url}/auth/login with { identifier, password }
 /// Returns API response verbatim.
 fn handle_auth_login(id: &str, payload: &Value) -> Response {
-    tracing::info!(op = "core.auth.login", "Handling auth.login");
+    tracing::info!(op = "core.auth.login", request_id = %id, "Handling auth.login");
 
     // Extract credentials
     let identifier = match payload.get("identifier").and_then(|v| v.as_str()) {
@@ -1179,6 +1242,7 @@ fn handle_execution_proxy_get(
     }
 
     let request_id = uuid::Uuid::new_v4().to_string();
+    tracing::info!(op = "core.execution.proxy", correlation_id = %request_id, action = %action, path = %path, "Proxying to engine");
     let send = |bearer: &str| -> Result<reqwest::blocking::Response, reqwest::Error> {
         client
             .get(&url)
@@ -1231,13 +1295,13 @@ fn handle_execution_proxy_get_by_id(
     handle_execution_proxy_get(id, payload, &path, action, &[])
 }
 
-/// execution.plans.runs.list — GET /auth/admin/execution/plans/{planId}/runs
+/// execution.plans.runs.list — GET /engine/admin/execution/plans/{planId}/runs
 fn handle_execution_plan_runs_list(id: &str, payload: &Value) -> Response {
     let plan_id = match payload.get("planId").and_then(|v| v.as_str()) {
         Some(v) => v,
         None => return Response::err(id.to_string(), "INVALID_PAYLOAD", "'planId' is required"),
     };
-    let path = format!("/auth/admin/execution/plans/{}/runs", plan_id);
+    let path = format!("/engine/admin/execution/plans/{}/runs", plan_id);
     handle_execution_proxy_get(id, payload, &path, "execution.plans.runs.list", &["limit", "offset"])
 }
 
@@ -1267,6 +1331,7 @@ fn handle_execution_runs_start(id: &str, payload: &Value) -> Response {
     };
 
     let request_id = uuid::Uuid::new_v4().to_string();
+    tracing::info!(op = "core.execution.runs.start.http", correlation_id = %request_id, "Proxying to engine");
     let body = serde_json::json!({
         "plan_id": payload.get("plan_id"),
         "inputs": payload.get("inputs").unwrap_or(&serde_json::json!({})),
@@ -1330,6 +1395,81 @@ fn parse_proxy_response(id: &str, resp: reqwest::blocking::Response) -> Response
 
 // =============================================================================
 // Debug (stateless)
+// =============================================================================
+
+/// admin.logs — proxy GET /engine/admin/logs with query params
+fn handle_admin_logs(id: &str, payload: &Value) -> Response {
+    let correlation_id = match payload.get("correlation_id").and_then(|v| v.as_str()) {
+        Some(v) => v,
+        None => return Response::err(id.to_string(), "INVALID_PAYLOAD", "'correlation_id' is required"),
+    };
+    let since = payload.get("since").and_then(|v| v.as_str()).unwrap_or("10m");
+    let limit = payload.get("limit").and_then(|v| v.as_i64()).unwrap_or(200);
+    let service = payload.get("service").and_then(|v| v.as_str());
+
+    let engine_url = config::engine_url();
+    let token = match get_cached_or_fresh_token(engine_url) {
+        Ok(t) => t,
+        Err(e) => return Response::err(id.to_string(), "NOT_AUTHENTICATED", &e),
+    };
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return Response::err(id.to_string(), "HTTP_CLIENT_ERROR", &e.to_string()),
+    };
+
+    let mut url = format!(
+        "{}/engine/admin/logs?correlation_id={}&since={}&limit={}",
+        engine_url,
+        correlation_id,
+        since,
+        limit,
+    );
+    if let Some(svc) = service {
+        url.push_str(&format!("&service={}", svc));
+    }
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    tracing::info!(op = "core.admin.logs", correlation_id = %correlation_id, "Fetching logs");
+
+    let send = |bearer: &str| -> Result<reqwest::blocking::Response, reqwest::Error> {
+        client
+            .get(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", bearer))
+            .header("X-EKKA-PROOF-TYPE", "jwt")
+            .header("X-REQUEST-ID", &request_id)
+            .header("X-EKKA-CORRELATION-ID", &request_id)
+            .header("X-EKKA-MODULE", "desktop")
+            .header("X-EKKA-ACTION", "admin.logs")
+            .header("X-EKKA-CLIENT", config::app_slug())
+            .header("X-EKKA-CLIENT-VERSION", "0.2.0")
+            .send()
+    };
+
+    let resp = match send(&token.token) {
+        Ok(r) => r,
+        Err(e) => return Response::err(id.to_string(), "REQUEST_FAILED", &e.to_string()),
+    };
+
+    if resp.status().as_u16() == 401 {
+        clear_auth_cache();
+        let retry_token = match get_cached_or_fresh_token(engine_url) {
+            Ok(t) => t,
+            Err(e) => return Response::err(id.to_string(), "NOT_AUTHENTICATED", &e),
+        };
+        let retry_resp = match send(&retry_token.token) {
+            Ok(r) => r,
+            Err(e) => return Response::err(id.to_string(), "REQUEST_FAILED", &e.to_string()),
+        };
+        return parse_proxy_response(id, retry_resp);
+    }
+
+    parse_proxy_response(id, resp)
+}
+
 // =============================================================================
 
 /// debug.isDevMode — check if running in development mode

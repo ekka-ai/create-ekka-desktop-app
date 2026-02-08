@@ -84,6 +84,9 @@ pub fn engine_disconnect(state: State<EngineState>) {
     // Clear vault cache first (before clearing auth)
     state.clear_vault_cache();
 
+    // Remove dev token + pointer files before clearing auth
+    auth::clear_dev_token();
+
     if let Ok(mut connected) = state.connected.lock() {
         *connected = false;
     }
@@ -326,6 +329,9 @@ pub fn engine_request(req: EngineRequest, state: State<EngineState>, app_handle:
         "execution.runs.get" => state.core_process.request("execution.runs.get", &req.payload),
         "execution.runs.events" => state.core_process.request("execution.runs.events", &req.payload),
         "execution.runs.start" => state.core_process.request("execution.runs.start", &req.payload),
+
+        // Admin (proxied to Desktop Core → engine API)
+        "admin.logs" => state.core_process.request("admin.logs", &req.payload),
 
         // Unknown
         _ => EngineResponse::err("INVALID_OP", &format!("Unknown operation: {}", req.op)),

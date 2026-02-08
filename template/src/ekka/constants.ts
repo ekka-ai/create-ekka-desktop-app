@@ -88,6 +88,9 @@ export const OPS = {
 
   // Vault - Audit
   VAULT_AUDIT_LIST: 'vault.audit.list',
+
+  // Admin
+  ADMIN_LOGS: 'admin.logs',
 } as const;
 
 export type OpName = (typeof OPS)[keyof typeof OPS];

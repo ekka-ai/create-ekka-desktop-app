@@ -381,6 +381,8 @@ fn main() {
         .run(move |_app, event| {
             if let tauri::RunEvent::Exit = event {
                 tracing::debug!(op = "desktop.shutdown", "Shutting down");
+                // Clean up dev token files before exit
+                crate::ops::auth::clear_dev_token();
                 engine_process::shutdown(&engine_for_shutdown);
             }
         });
