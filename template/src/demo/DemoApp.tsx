@@ -13,6 +13,7 @@
 
 import { useState, useEffect, type ReactElement, type CSSProperties } from 'react';
 import { ekka, advanced, EkkaError, addAuditEvent, type HomeStatus, type SetupStatus } from '../ekka';
+import type { BackendInitError } from '../ekka/internal/backend';
 import { Shell } from './layout/Shell';
 import { type Page } from './layout/Sidebar';
 import { SystemPage } from './pages/SystemPage';
@@ -25,8 +26,9 @@ import { ExecutionRunDetailPage } from './pages/ExecutionRunDetailPage';
 import { LoginPage } from './pages/LoginPage';
 import { HomeSetupPage } from './pages/HomeSetupPage';
 import { SetupWizard } from './components/SetupWizard';
+import { FatalErrorScreen } from './components/FatalErrorScreen';
 
-type AppState = 'loading' | 'setup' | 'login' | 'home-setup' | 'ready';
+type AppState = 'loading' | 'setup' | 'login' | 'home-setup' | 'ready' | 'fatal';
 
 interface DemoState {
   appState: AppState;
@@ -34,6 +36,7 @@ interface DemoState {
   homeStatus: HomeStatus | null;
   connected: boolean;
   error: string | null;
+  fatalError: BackendInitError | null;
 }
 
 export function DemoApp(): ReactElement {
@@ -51,6 +54,7 @@ export function DemoApp(): ReactElement {
     homeStatus: null,
     connected: false,
     error: null,
+    fatalError: null,
   });
 
   useEffect(() => {
@@ -98,6 +102,20 @@ export function DemoApp(): ReactElement {
 
       await checkHomeStatus();
     } catch (err: unknown) {
+      // Check if this is a backend init error (engine_connect failure)
+      const backendInitError = (err as Error & { backendInitError?: BackendInitError })?.backendInitError;
+
+      if (backendInitError) {
+        // Fatal error: engine connection failed
+        setState((s) => ({
+          ...s,
+          appState: 'fatal',
+          fatalError: backendInitError,
+          error: backendInitError.error_message
+        }));
+        return;
+      }
+
       const message = err instanceof EkkaError ? err.message : 'Connection failed';
 
       // Check if setup is incomplete - if so, stay in setup mode
@@ -203,6 +221,11 @@ export function DemoApp(): ReactElement {
       fontSize: '14px',
     };
     return <div style={style}>Connecting...</div>;
+  }
+
+  // Fatal error (engine connection failed)
+  if (state.appState === 'fatal' && state.fatalError) {
+    return <FatalErrorScreen error={state.fatalError} darkMode={darkMode} />;
   }
 
   // Setup wizard (pre-login)

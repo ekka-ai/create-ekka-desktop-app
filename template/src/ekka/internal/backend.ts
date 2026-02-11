@@ -1,54 +1,79 @@
 /**
  * EKKA Internal Backend
  *
- * SmartBackend auto-detects engine vs demo mode on connect.
+ * Connects to EKKA Bridge (engine mode only).
  * This module is NOT exported publicly - only accessible via _internal.
  */
 
 import type { EngineRequest, EngineResponse } from '../types';
 import { err, makeRequest } from '../types';
-import { DemoBackend } from '../backend/demo';
 
 /**
- * Transport mode - determined on connect.
+ * Transport mode - always 'engine' after successful connect.
  */
-export type TransportMode = 'unknown' | 'engine' | 'demo';
+export type TransportMode = 'unknown' | 'engine';
 
 /**
- * SmartBackend - single backend that auto-detects engine vs demo.
- *
- * On connect():
- * - Tries to connect to EKKA Bridge
- * - If successful: engine mode
- * - If fails: demo mode (in-memory)
+ * Backend init error with detailed failure context.
  */
-class SmartBackend {
+export interface BackendInitError {
+  op: string;
+  error_message: string;
+  stack?: string;
+  ts_timestamp: string;
+  correlation_id: string;
+}
+
+/**
+ * EngineBackend - connects to EKKA Bridge only.
+ * Hard-fails if engine_connect fails (no demo fallback).
+ */
+class EngineBackend {
   private mode: TransportMode = 'unknown';
   private connected = false;
-  private demoBackend = new DemoBackend();
 
   /**
-   * Connect to the backend.
-   * Auto-detects engine vs demo mode.
+   * Connect to EKKA Bridge.
+   * Throws BackendInitError on failure.
    */
   async connect(): Promise<void> {
     if (this.connected) return;
 
-    // Try engine first (only works in EKKA Bridge with engine present)
+    const correlationId = crypto.randomUUID();
+
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('engine_connect');
       this.mode = 'engine';
       this.connected = true;
-      return;
-    } catch {
-      // Engine not available - use demo mode
-    }
 
-    // Fall back to demo mode
-    this.mode = 'demo';
-    await this.demoBackend.connect();
-    this.connected = true;
+      console.log(`[desktop.backend.init.success] correlation_id=${correlationId} mode=engine`);
+      return;
+    } catch (e: unknown) {
+      const error_message = e instanceof Error ? e.message : String(e);
+      const stack = e instanceof Error ? e.stack : undefined;
+
+      const initError: BackendInitError = {
+        op: 'engine_connect',
+        error_message,
+        stack,
+        ts_timestamp: new Date().toISOString(),
+        correlation_id: correlationId,
+      };
+
+      // Log structured failure
+      console.error(
+        `[desktop.backend.init.failed] correlation_id=${correlationId} op=engine_connect error="${error_message}"`,
+        { details: initError }
+      );
+
+      // Re-throw as Error with serialized details
+      const fatalError = new Error(`Engine connection failed: ${error_message}`) as Error & {
+        backendInitError: BackendInitError;
+      };
+      fatalError.backendInitError = initError;
+      throw fatalError;
+    }
   }
 
   /**
@@ -57,14 +82,10 @@ class SmartBackend {
   disconnect(): void {
     if (!this.connected) return;
 
-    if (this.mode === 'engine') {
-      // Fire and forget
-      import('@tauri-apps/api/core')
-        .then(({ invoke }) => invoke('engine_disconnect'))
-        .catch(() => {});
-    } else {
-      this.demoBackend.disconnect();
-    }
+    // Fire and forget
+    import('@tauri-apps/api/core')
+      .then(({ invoke }) => invoke('engine_disconnect'))
+      .catch(() => {});
 
     this.connected = false;
     this.mode = 'unknown';
@@ -88,7 +109,7 @@ class SmartBackend {
    * Send a request to the backend.
    */
   async request(req: EngineRequest): Promise<EngineResponse> {
-    // LOCAL-ONLY OPERATIONS: Always route to Bridge, never to demo backend
+    // LOCAL-ONLY OPERATIONS: Always route to Bridge, regardless of connection state
     // These are desktop-specific operations that must be handled by Rust handlers
     const localOnlyOps = [
       'setup.status',
@@ -99,8 +120,6 @@ class SmartBackend {
 
     const isLocalOnlyOp = localOnlyOps.includes(req.op);
 
-    // Local-only ops ALWAYS go to Bridge - regardless of connection state or mode
-    // This ensures setup operations never accidentally route to demo backend
     if (isLocalOnlyOp) {
       console.log(`[ts.op.dispatch] op=${req.op} backend=bridge (local-only)`);
       try {
@@ -119,18 +138,14 @@ class SmartBackend {
 
     console.log(`[ts.op.dispatch] op=${req.op} backend=${this.mode} connected=${this.connected}`);
 
-    if (this.mode === 'engine') {
-      try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        return await invoke<EngineResponse>('engine_request', { req });
-      } catch (e) {
-        const message = e instanceof Error ? e.message : 'Unknown invoke error';
-        return err('INTERNAL_ERROR', message);
-      }
+    // All ops go to engine (demo mode removed)
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<EngineResponse>('engine_request', { req });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Unknown invoke error';
+      return err('INTERNAL_ERROR', message);
     }
-
-    // Demo mode
-    return this.demoBackend.request(req);
   }
 }
 
@@ -138,7 +153,7 @@ class SmartBackend {
 // INTERNAL API (not exported from package)
 // =============================================================================
 
-const backend = new SmartBackend();
+const backend = new EngineBackend();
 
 /**
  * Internal API - only accessible within the ekka package.
