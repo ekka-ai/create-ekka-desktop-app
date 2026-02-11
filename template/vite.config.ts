@@ -1,10 +1,18 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { resolve } from 'path'
+import { readFileSync } from 'fs'
+
+// Read branding from app.config.json (single source of truth)
+const appConfig = JSON.parse(readFileSync(resolve(__dirname, 'app.config.json'), 'utf8'))
 
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
+
+  define: {
+    __APP_NAME__: JSON.stringify(appConfig.app.name),
+  },
   resolve: {
     alias: {
       '@ekka': resolve(__dirname, 'src/ekka'),

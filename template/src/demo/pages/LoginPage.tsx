@@ -134,7 +134,7 @@ export function LoginPage({ onLoginSuccess, darkMode }: LoginPageProps): ReactEl
   return (
     <div style={styles.container}>
       <div style={styles.card}>
-        <div style={styles.logo}>EKKA Desktop</div>
+        <div style={styles.logo}>{__APP_NAME__}</div>
         <div style={styles.subtitle}>Sign in to continue</div>
 
         <form style={styles.form} onSubmit={handleSubmit}>

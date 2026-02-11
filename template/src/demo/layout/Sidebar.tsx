@@ -118,7 +118,7 @@ export function Sidebar({ selectedPage, onNavigate, darkMode }: SidebarProps): R
   return (
     <aside style={styles.sidebar}>
       <div style={styles.logo}>
-        <span style={styles.logoText}>EKKA Desktop</span>
+        <span style={styles.logoText}>{__APP_NAME__}</span>
       </div>
 
       <nav style={styles.nav}>
